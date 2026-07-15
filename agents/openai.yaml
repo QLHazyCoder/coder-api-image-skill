@@ -1,0 +1,4 @@
+interface:
+  display_name: "Coder API Image"
+  short_description: "Generate images through Coder API with one key"
+  default_prompt: "Use $coder-api-image to generate an image with Coder API."
