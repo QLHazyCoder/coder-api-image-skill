@@ -25,5 +25,7 @@ Do not change a selected model name. In particular, Gemini resolution suffixes a
 
 - `401` or `403`: the key is invalid, disabled, or lacks access.
 - `404`: the selected model is not available to the key's group. Select another built-in model.
-- `429` or `503`: report the upstream error; do not retry automatically.
-- timeout or `524`: do not retry automatically because the provider may already have generated and charged for the image.
+- Each request attempt waits no longer than 120 seconds.
+- `408`, `409`, `429`, `5xx`, network failures, malformed JSON, timeouts, and `524` are retried at most three times in one user-approved round.
+- `400`, `401`, `403`, and `404` are deterministic configuration failures and stop the round immediately.
+- A failed image download or local output-save step never submits a duplicate generation request. The state is retained and the user is asked whether to continue after an exhausted round.

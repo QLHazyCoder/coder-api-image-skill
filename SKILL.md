@@ -1,40 +1,47 @@
 ---
 name: coder-api-image
-description: Generate images through Coder API for users who provide a Coder API key. Use when a user explicitly asks to create, draw, or generate an image, illustration, poster, icon, wallpaper, or other visual asset with Coder API.
+description: Generate images through Coder API at api.qlhazycoder.tech. Use this instead of generic image-generation tooling whenever a user asks to create an image with Coder API, a Coder API key, a saved Coder key, or this API endpoint. Before generating, guide local key saving and require an explicit model choice when the user did not name one.
 ---
 
 # Coder API Image
 
-Generate one image through `https://api.qlhazycoder.tech/v1`. Store the user's key only through the script's hidden `--configure` prompt; never ask for or print the key in chat, commands, files, or logs.
+Generate one image through `https://api.qlhazycoder.tech/v1`. Use the workflow state machine below; do not call `--generate` with free-form model, size, or prompt arguments. Store a key only through the script's hidden prompt; never print it in chat, commands, files, or logs.
 
-## First-Time Setup
+This skill cannot invoke a native Codex or Claude Code user-question UI. Ask required questions in the current chat and wait for the user's next reply.
 
-When no API key is available, ask the user whether they want to configure it locally, then run:
+## Key Handling
+
+When the user provides a Coder API key in chat and there is no already configured local key, ask whether they want to save it locally before generating. Do not silently save it. Do not repeat the question when a local key is already configured or `CODER_API_KEY` is set.
+
+If the user chooses local storage, provide the security reminder below, then enter the key only through the script's hidden prompt with the active workflow state:
 
 ```bash
-python3 scripts/generate_image.py --configure
+python3 scripts/generate_image.py --save-local-key --state <state>
 ```
 
-The script stores the key outside the Skill and repository at `~/.config/coder-api-image/credentials.json` with permissions `0600`. It does not validate the key during setup.
+The script stores the key outside the Skill and repository at `~/.config/coder-api-image/credentials.json` with permissions `0600`. It does not validate the key during setup. If the user declines local storage, do not place the key in a visible command, file, or log.
 
-Before asking the user to enter a key, explicitly remind them to enable model limits for that key and allow only the models they intend to use. Recommend an IP allowlist only when the Codex machine has a stable public egress IP; dynamic home or mobile IPs can otherwise cause avoidable authorization failures.
+Before asking the user to enter a key, explicitly remind them to enable model limits for that key and allow only the models they intend to use. Recommend an IP allowlist only when the Codex machine has a stable public egress IP; dynamic home or mobile IPs can otherwise cause avoidable authorization failures. After a successful generation that used a newly saved local key, repeat this short reminder in the user-facing result.
 
 For automation, `CODER_API_KEY` takes precedence over the locally stored key. Remove a saved key with `python3 scripts/generate_image.py --remove-key`.
 
 ## Workflow
 
-1. Confirm that the user wants image generation. This operation may incur a charge.
-2. Collect the image prompt. Preserve explicit visual constraints from the user.
-3. If no model was supplied, ask the user to choose from the built-in models. Present GPT Image 2 as the default.
-4. Ask for the model-specific layout setting:
-   - GPT Image 2: `1024x1024`, `1536x1024`, or `1024x1536`.
-   - Gemini: `1:1`, `16:9`, or `9:16` aspect ratio.
-5. If the user says `default`, infer the layout from the request:
-   - portrait, phone wallpaper, cover, or vertical poster: portrait;
-   - banner, desktop wallpaper, landscape scene, or horizontal poster: landscape;
-   - otherwise: square.
-6. Run `scripts/generate_image.py`. Pass the exact chosen model name. Do not rewrite its spelling or resolution suffix.
-7. Report the generated file path. Do not paste Base64 image data into the response.
+1. Confirm that the user wants image generation. This operation may incur a charge. Collect the prompt, then run:
+
+   ```bash
+   python3 scripts/generate_image.py --begin --prompt "<prompt>"
+   ```
+
+2. Read the JSON result and stop at every `status`; do not run the next command until the user has answered the required question.
+   - `key_storage_decision`: ask whether the user wants local storage. GPT Image generation cannot proceed until a local key or `CODER_API_KEY` is available. If they confirm storage, run `--save-local-key --state <state>`; otherwise ask them to set `CODER_API_KEY` and start a new workflow.
+   - `model_selection`: ask the user to select a **Built-In Model**. Present GPT Image 2 as default, but `default` is a user choice, never an agent assumption. Then run `--select-model --state <state> --model <exact-model-name>`.
+   - `layout_selection`: ask for the returned size or aspect-ratio options. If the user says `default`, infer portrait for vertical requests, landscape for banners or horizontal scenes, and square otherwise. Then run `--select-layout` with the exact returned parameter.
+   - `ready`: run `--generate --state <state> --output-dir <output-dir>`. Each attempt has a fixed maximum wait of 120 seconds.
+   - `retry_exhausted`: three attempts failed, or the error is deterministic and cannot benefit from a retry. Ask in the current chat whether the user wants another round. Only after confirmation run `--continue-retry --state <state>`, then run `--generate` again. Never continue automatically.
+
+3. Pass exact model names. Never rewrite a Gemini `-1k`, `-2k`, or `-4k` suffix. Do not invoke the system `imagegen` skill or another image tool as a fallback.
+4. Report the generated file path and exact model. If the JSON result contains `security_reminder`, relay it verbatim after the result.
 
 ## Built-In Models
 
@@ -55,28 +62,19 @@ List the available models:
 python3 scripts/generate_image.py --list-models
 ```
 
-Generate with GPT Image 2:
+Start a workflow:
 
 ```bash
 python3 scripts/generate_image.py \
-  --model gpt-image-2 \
-  --size 1536x1024 \
+  --begin \
   --prompt "A neon-lit cyberpunk city at night, cinematic rain"
-```
-
-Generate with Gemini:
-
-```bash
-python3 scripts/generate_image.py \
-  --model gemini-3.1-flash-image-2k \
-  --aspect-ratio 16:9 \
-  --prompt "A quiet alpine lake at sunrise, editorial travel photography"
 ```
 
 Read `references/api.md` only when troubleshooting API payloads, errors, or output handling.
 
 ## Failure Rules
 
-- Do not retry a timeout, `524`, or any uncertain request automatically. A generation may already have completed and been charged.
+- Transient generation failures, including timeouts and `524`, are retried at most three times per user-approved round. This can create duplicate charges when the upstream completed an uncertain attempt; do not start another round without the user's explicit confirmation.
 - Surface `401`, `403`, `404`, `429`, and upstream error messages concisely without exposing the API key or Base64 data.
 - A model-unavailable error means the user's key group does not currently support that built-in model. Ask the user to select another listed model.
+- Do not bypass a state with a default model, inferred layout, or automatic local-key write. A workflow state is deleted only after successful generation.

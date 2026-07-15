@@ -11,6 +11,8 @@ import getpass
 import json
 import os
 import sys
+import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +24,10 @@ DEFAULT_BASE_URL = "https://api.qlhazycoder.tech/v1"
 DEFAULT_MODEL = "gpt-image-2"
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
 CONFIG_ENV_VAR = "CODER_API_CONFIG_PATH"
+WORKFLOW_STATE_VERSION = 1
+MAX_REQUEST_TIMEOUT_SECONDS = 120
+MAX_GENERATION_ATTEMPTS = 3
+RETRY_DELAYS_SECONDS = (1, 2)
 
 MODEL_CATALOG: dict[str, dict[str, Any]] = {
     "gpt-image-2": {
@@ -65,19 +71,53 @@ class SkillError(Exception):
     """An error that is safe to return to the agent or user."""
 
 
+class GenerationError(SkillError):
+    """A generation request failure with retry guidance."""
+
+    def __init__(self, message: str, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
+class RetryExhausted(SkillError):
+    """All allowed generation attempts failed or retrying would be pointless."""
+
+    def __init__(self, attempts: int, last_error: SkillError) -> None:
+        super().__init__(str(last_error))
+        self.attempts = attempts
+        self.last_error = str(last_error)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list-models", action="store_true", help="print the built-in model catalog")
     parser.add_argument("--configure", action="store_true", help="save an API key in the local private config")
+    parser.add_argument(
+        "--confirm-local-storage",
+        action="store_true",
+        help="required acknowledgement before --configure writes a local key",
+    )
     parser.add_argument("--remove-key", action="store_true", help="delete the locally saved API key")
     parser.add_argument("--show-config-path", action="store_true", help="print the local private config path")
+    parser.add_argument("--begin", action="store_true", help="start an image-generation workflow")
+    parser.add_argument("--save-local-key", action="store_true", help="save a key for a workflow after user confirmation")
+    parser.add_argument("--select-model", action="store_true", help="record a model choice for a workflow")
+    parser.add_argument("--select-layout", action="store_true", help="record a layout choice for a workflow")
+    parser.add_argument("--generate", action="store_true", help="generate from a ready workflow")
+    parser.add_argument("--continue-retry", action="store_true", help="start another retry round after user confirmation")
+    parser.add_argument("--state", help="workflow state file returned by --begin")
     parser.add_argument("--prompt", help="image prompt")
-    parser.add_argument("--model", choices=sorted(MODEL_CATALOG), default=DEFAULT_MODEL)
+    parser.add_argument("--model", choices=sorted(MODEL_CATALOG), help="explicit model choice")
     parser.add_argument("--size", help="GPT Image 2 size")
     parser.add_argument("--aspect-ratio", help="Gemini aspect ratio")
     parser.add_argument("--output-dir", default=".", help="directory for the generated file")
     parser.add_argument("--output", help="optional output filename")
-    parser.add_argument("--timeout", type=int, default=300, help="request timeout in seconds")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=MAX_REQUEST_TIMEOUT_SECONDS,
+        help=f"per-attempt request timeout in seconds (maximum {MAX_REQUEST_TIMEOUT_SECONDS})",
+    )
     return parser.parse_args()
 
 
@@ -98,8 +138,10 @@ def model_catalog_for_output() -> list[dict[str, Any]]:
 def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     if not args.prompt or not args.prompt.strip():
         raise SkillError("--prompt is required")
-    if args.timeout <= 0:
-        raise SkillError("--timeout must be positive")
+    if not args.model:
+        raise SkillError("--model is required; select a model through the workflow first")
+    if args.timeout <= 0 or args.timeout > MAX_REQUEST_TIMEOUT_SECONDS:
+        raise SkillError(f"--timeout must be between 1 and {MAX_REQUEST_TIMEOUT_SECONDS} seconds")
 
     model = args.model
     config = MODEL_CATALOG[model]
@@ -113,7 +155,9 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     if config["parameter"] == "size":
         if args.aspect_ratio:
             raise SkillError(f"{model} uses --size, not --aspect-ratio")
-        size = args.size or config["default"]
+        size = args.size
+        if not size:
+            raise SkillError(f"--size is required for {model}; select a layout through the workflow first")
         if size not in config["options"]:
             raise SkillError(f"unsupported size {size!r} for {model}")
         payload["size"] = size
@@ -123,7 +167,9 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
 
     if args.size:
         raise SkillError(f"{model} uses --aspect-ratio, not --size")
-    aspect_ratio = args.aspect_ratio or config["default"]
+    aspect_ratio = args.aspect_ratio
+    if not aspect_ratio:
+        raise SkillError(f"--aspect-ratio is required for {model}; select a layout through the workflow first")
     if aspect_ratio not in config["options"]:
         raise SkillError(f"unsupported aspect ratio {aspect_ratio!r} for {model}")
     payload["aspect_ratio"] = aspect_ratio
@@ -186,11 +232,12 @@ def security_reminder() -> str:
     )
 
 
-def configure_api_key(config_path: Path) -> None:
+def configure_api_key(config_path: Path, emit_reminder: bool = True) -> None:
     api_key = getpass.getpass("Coder API key (stored locally with mode 0600): ").strip()
     write_local_api_key(config_path, api_key)
-    print(f"Saved local API key to {config_path}")
-    print(security_reminder())
+    if emit_reminder:
+        print(f"Saved local API key to {config_path}")
+        print(security_reminder())
 
 
 def remove_local_api_key(config_path: Path) -> None:
@@ -200,6 +247,173 @@ def remove_local_api_key(config_path: Path) -> None:
         print(f"No local API key was stored at {config_path}")
         return
     print(f"Removed local API key from {config_path}")
+
+
+def write_private_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        descriptor = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as state_file:
+            json.dump(payload, state_file, ensure_ascii=False)
+            state_file.write("\n")
+        os.replace(temporary_path, path)
+        os.chmod(path, 0o600)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def create_workflow_state(prompt: str) -> Path:
+    if not prompt.strip():
+        raise SkillError("--prompt is required with --begin")
+    environment_key = os.environ.get("CODER_API_KEY", "").strip()
+    key_available = bool(environment_key or read_local_api_key(local_config_path()))
+    state_directory = Path(tempfile.mkdtemp(prefix="coder-api-image-"))
+    os.chmod(state_directory, 0o700)
+    state_path = state_directory / "workflow.json"
+    state = {
+        "version": WORKFLOW_STATE_VERSION,
+        "prompt": prompt.strip(),
+        "status": "model_selection" if key_available else "key_storage_decision",
+        "local_key_saved": False,
+    }
+    write_private_json(state_path, state)
+    return state_path
+
+
+def remove_workflow_state(state_path: Path) -> None:
+    state_path.unlink(missing_ok=True)
+    temporary_root = Path(tempfile.gettempdir()).resolve()
+    if state_path.parent.parent == temporary_root and state_path.parent.name.startswith("coder-api-image-"):
+        state_path.parent.rmdir()
+
+
+def read_workflow_state(state_path: Path) -> dict[str, Any]:
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise SkillError("workflow state does not exist; start again with --begin") from error
+    except (OSError, json.JSONDecodeError) as error:
+        raise SkillError(f"workflow state is invalid: {error}") from error
+    if not isinstance(state, dict) or state.get("version") != WORKFLOW_STATE_VERSION:
+        raise SkillError("workflow state is invalid or from an unsupported version")
+    if not isinstance(state.get("prompt"), str) or not isinstance(state.get("status"), str):
+        raise SkillError("workflow state is invalid")
+    return state
+
+
+def require_state_path(args: argparse.Namespace) -> Path:
+    if not args.state:
+        raise SkillError("--state is required for this workflow operation")
+    return Path(args.state).expanduser().resolve()
+
+
+def workflow_result(state_path: Path, state: dict[str, Any]) -> dict[str, Any]:
+    status = state["status"]
+    result: dict[str, Any] = {"state": str(state_path), "status": status}
+    if status == "key_storage_decision":
+        result.update(
+            {
+                "action": "ask_user_to_confirm_local_key_storage",
+                "security_reminder": security_reminder(),
+            }
+        )
+    elif status == "model_selection":
+        result.update(
+            {
+                "action": "ask_user_to_choose_model",
+                "default_model": DEFAULT_MODEL,
+                "models": model_catalog_for_output(),
+            }
+        )
+    elif status == "layout_selection":
+        model = state["model"]
+        config = MODEL_CATALOG[model]
+        result.update(
+            {
+                "action": "ask_user_to_choose_layout",
+                "model": model,
+                "parameter": config["parameter"],
+                "options": config["options"],
+                "default": config["default"],
+            }
+        )
+    elif status == "ready":
+        result.update({"action": "ready_to_generate", "model": state["model"], "layout": state["layout"]})
+    elif status == "retry_exhausted":
+        result.update(
+            {
+                "action": "ask_user_to_continue_retrying",
+                "attempts": state["last_failure"]["attempts"],
+                "last_error": state["last_failure"]["last_error"],
+            }
+        )
+    else:
+        raise SkillError("workflow state has an unsupported status")
+    return result
+
+
+def save_local_key_for_workflow(args: argparse.Namespace) -> dict[str, Any]:
+    state_path = require_state_path(args)
+    state = read_workflow_state(state_path)
+    if state["status"] != "key_storage_decision":
+        raise SkillError("local key storage is not the next workflow step")
+    configure_api_key(local_config_path(), emit_reminder=False)
+    state["local_key_saved"] = True
+    state["status"] = "model_selection"
+    write_private_json(state_path, state)
+    return workflow_result(state_path, state)
+
+
+def select_workflow_model(args: argparse.Namespace) -> dict[str, Any]:
+    state_path = require_state_path(args)
+    state = read_workflow_state(state_path)
+    if state["status"] != "model_selection":
+        raise SkillError("model selection is not the next workflow step")
+    if not args.model:
+        raise SkillError("--model is required with --select-model")
+    state["model"] = args.model
+    state["status"] = "layout_selection"
+    write_private_json(state_path, state)
+    return workflow_result(state_path, state)
+
+
+def select_workflow_layout(args: argparse.Namespace) -> dict[str, Any]:
+    state_path = require_state_path(args)
+    state = read_workflow_state(state_path)
+    if state["status"] != "layout_selection":
+        raise SkillError("layout selection is not the next workflow step")
+    model = state.get("model")
+    if model not in MODEL_CATALOG:
+        raise SkillError("workflow state has an invalid model")
+    config = MODEL_CATALOG[model]
+    if config["parameter"] == "size":
+        if args.aspect_ratio:
+            raise SkillError(f"{model} uses --size, not --aspect-ratio")
+        if args.size not in config["options"]:
+            raise SkillError(f"unsupported size {args.size!r} for {model}")
+        state["layout"] = {"size": args.size}
+    else:
+        if args.size:
+            raise SkillError(f"{model} uses --aspect-ratio, not --size")
+        if args.aspect_ratio not in config["options"]:
+            raise SkillError(f"unsupported aspect ratio {args.aspect_ratio!r} for {model}")
+        state["layout"] = {"aspect_ratio": args.aspect_ratio}
+    state["status"] = "ready"
+    write_private_json(state_path, state)
+    return workflow_result(state_path, state)
+
+
+def continue_workflow_retry(args: argparse.Namespace) -> dict[str, Any]:
+    state_path = require_state_path(args)
+    state = read_workflow_state(state_path)
+    if state["status"] != "retry_exhausted":
+        raise SkillError("retry continuation is not the next workflow step")
+    state.pop("last_failure", None)
+    state["status"] = "ready"
+    state["retry_round"] = int(state.get("retry_round", 0)) + 1
+    write_private_json(state_path, state)
+    return workflow_result(state_path, state)
 
 
 def read_api_key() -> str:
@@ -241,20 +455,24 @@ def post_generation(payload: dict[str, Any], api_key: str, base_url: str, timeou
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read(MAX_IMAGE_BYTES + 1)
     except urllib.error.HTTPError as error:
-        raise SkillError(f"generation failed with HTTP {error.code}: {api_error_message(error.read(8192))}") from error
+        retryable = error.code == 408 or error.code == 409 or error.code == 429 or error.code >= 500
+        raise GenerationError(
+            f"generation failed with HTTP {error.code}: {api_error_message(error.read(8192))}",
+            retryable=retryable,
+        ) from error
     except urllib.error.URLError as error:
-        raise SkillError(f"generation request failed: {error.reason}") from error
+        raise GenerationError(f"generation request failed: {error.reason}", retryable=True) from error
     except TimeoutError as error:
-        raise SkillError("generation request timed out; do not retry automatically because it may have completed") from error
+        raise GenerationError("generation request timed out", retryable=True) from error
 
     if len(body) > MAX_IMAGE_BYTES:
-        raise SkillError("generation response exceeds the 50 MiB safety limit")
+        raise GenerationError("generation response exceeds the 50 MiB safety limit", retryable=False)
     try:
         decoded = json.loads(body)
     except json.JSONDecodeError as error:
-        raise SkillError("generation response was not valid JSON") from error
+        raise GenerationError("generation response was not valid JSON", retryable=True) from error
     if not isinstance(decoded, dict):
-        raise SkillError("generation response was not an object")
+        raise GenerationError("generation response was not an object", retryable=True)
     return decoded
 
 
@@ -348,9 +566,51 @@ def save_first_image(response: dict[str, Any], output_dir: Path, output: str | N
     return output_path.resolve(), mime_type, revised_prompt
 
 
+def generate_with_retries(
+    payload: dict[str, Any],
+    api_key: str,
+    base_url: str,
+    timeout: int,
+    output_dir: Path,
+    output: str | None,
+) -> tuple[Path, str, str]:
+    for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1):
+        try:
+            response = post_generation(payload, api_key, base_url, timeout)
+        except GenerationError as error:
+            if not error.retryable or attempt == MAX_GENERATION_ATTEMPTS:
+                raise RetryExhausted(attempt, error) from error
+            time.sleep(RETRY_DELAYS_SECONDS[attempt - 1])
+            continue
+
+        try:
+            return save_first_image(response, output_dir, output, timeout, base_url)
+        except SkillError as error:
+            # The upstream may have completed; never submit a duplicate request for a local save/download failure.
+            raise RetryExhausted(attempt, error) from error
+
+    raise AssertionError("generation retry loop terminated unexpectedly")
+
+
 def main() -> int:
     args = parse_args()
     try:
+        if args.timeout <= 0 or args.timeout > MAX_REQUEST_TIMEOUT_SECONDS:
+            raise SkillError(f"--timeout must be between 1 and {MAX_REQUEST_TIMEOUT_SECONDS} seconds")
+        operations = [
+            args.list_models,
+            args.configure,
+            args.remove_key,
+            args.show_config_path,
+            args.begin,
+            args.save_local_key,
+            args.select_model,
+            args.select_layout,
+            args.generate,
+            args.continue_retry,
+        ]
+        if sum(operations) != 1:
+            raise SkillError("choose exactly one operation")
         if args.list_models:
             print(json.dumps({"default_model": DEFAULT_MODEL, "models": model_catalog_for_output()}, ensure_ascii=False, indent=2))
             return 0
@@ -359,25 +619,66 @@ def main() -> int:
             print(config_path)
             return 0
         if args.configure:
-            if args.remove_key or args.prompt:
-                raise SkillError("--configure cannot be combined with --remove-key or --prompt")
+            if not args.confirm_local_storage:
+                raise SkillError("--configure requires --confirm-local-storage")
+            if args.prompt or args.state:
+                raise SkillError("--configure cannot be combined with --prompt or --state")
             configure_api_key(config_path)
+            print(json.dumps({"configured": str(config_path), "security_reminder": security_reminder()}, ensure_ascii=False))
             return 0
         if args.remove_key:
-            if args.prompt:
-                raise SkillError("--remove-key cannot be combined with --prompt")
+            if args.prompt or args.state:
+                raise SkillError("--remove-key cannot be combined with --prompt or --state")
             remove_local_api_key(config_path)
             return 0
-        payload = build_payload(args)
-        base_url = api_base_url()
-        response = post_generation(payload, read_api_key(), base_url, args.timeout)
-        output_path, mime_type, revised_prompt = save_first_image(
-            response,
-            Path(args.output_dir),
-            args.output,
-            args.timeout,
-            base_url,
+        if args.begin:
+            state_path = create_workflow_state(args.prompt or "")
+            print(json.dumps(workflow_result(state_path, read_workflow_state(state_path)), ensure_ascii=False))
+            return 0
+        if args.save_local_key:
+            print(json.dumps(save_local_key_for_workflow(args), ensure_ascii=False))
+            return 0
+        if args.select_model:
+            print(json.dumps(select_workflow_model(args), ensure_ascii=False))
+            return 0
+        if args.select_layout:
+            print(json.dumps(select_workflow_layout(args), ensure_ascii=False))
+            return 0
+        if args.continue_retry:
+            print(json.dumps(continue_workflow_retry(args), ensure_ascii=False))
+            return 0
+
+        state_path = require_state_path(args)
+        state = read_workflow_state(state_path)
+        if state["status"] != "ready":
+            raise SkillError(f"workflow is not ready to generate; next step is {state['status']}")
+        layout = state.get("layout")
+        if not isinstance(layout, dict):
+            raise SkillError("workflow state has an invalid layout")
+        generation_args = argparse.Namespace(
+            prompt=state["prompt"],
+            model=state.get("model"),
+            size=layout.get("size"),
+            aspect_ratio=layout.get("aspect_ratio"),
+            timeout=args.timeout,
         )
+        payload = build_payload(generation_args)
+        base_url = api_base_url()
+        try:
+            output_path, mime_type, revised_prompt = generate_with_retries(
+                payload,
+                read_api_key(),
+                base_url,
+                args.timeout,
+                Path(args.output_dir),
+                args.output,
+            )
+        except RetryExhausted as error:
+            state["status"] = "retry_exhausted"
+            state["last_failure"] = {"attempts": error.attempts, "last_error": error.last_error}
+            write_private_json(state_path, state)
+            print(json.dumps(workflow_result(state_path, state), ensure_ascii=False))
+            return 0
     except SkillError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -385,6 +686,9 @@ def main() -> int:
     result = {"file": str(output_path), "model": payload["model"], "mime_type": mime_type}
     if revised_prompt:
         result["revised_prompt"] = revised_prompt
+    if state.get("local_key_saved"):
+        result["security_reminder"] = security_reminder()
+    remove_workflow_state(state_path)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 
