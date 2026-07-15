@@ -28,13 +28,40 @@ WORKFLOW_STATE_VERSION = 1
 MAX_REQUEST_TIMEOUT_SECONDS = 120
 MAX_GENERATION_ATTEMPTS = 3
 RETRY_DELAYS_SECONDS = (1, 2)
+GPT_IMAGE_2_SIZES = [
+    "auto",
+    "1024x1024",
+    "1024x1536",
+    "1536x1024",
+    "1024x1792",
+    "1792x1024",
+    "2048x2048",
+    "2560x1440",
+    "1440x2560",
+    "3840x2160",
+    "2160x3840",
+]
+GPT_IMAGE_2_SIZE_LABELS = {
+    "auto": "auto (model selected)",
+    "1024x1024": "1024x1024 (1K)",
+    "1024x1536": "1024x1536 (about 1.5K)",
+    "1536x1024": "1536x1024 (about 1.5K)",
+    "1024x1792": "1024x1792 (about 1.8K)",
+    "1792x1024": "1792x1024 (about 1.8K)",
+    "2048x2048": "2048x2048 (2K)",
+    "2560x1440": "2560x1440 (about 2.5K)",
+    "1440x2560": "1440x2560 (about 2.5K)",
+    "3840x2160": "3840x2160 (4K)",
+    "2160x3840": "2160x3840 (4K)",
+}
 
 MODEL_CATALOG: dict[str, dict[str, Any]] = {
     "gpt-image-2": {
         "label": "GPT Image 2",
         "parameter": "size",
-        "options": ["1024x1024", "1536x1024", "1024x1536"],
+        "options": GPT_IMAGE_2_SIZES,
         "default": "1024x1024",
+        "option_labels": GPT_IMAGE_2_SIZE_LABELS,
     },
     "gemini-3.1-flash-image-1k": {
         "label": "Gemini 3.1 Flash Image 1K",
@@ -128,11 +155,17 @@ def model_catalog_for_output() -> list[dict[str, Any]]:
             "label": config["label"],
             "parameter": config["parameter"],
             "options": config["options"],
+            "display_options": option_display_values(config),
             "default": config["default"],
             "resolution_locked": config.get("resolution_locked"),
         }
         for model, config in MODEL_CATALOG.items()
     ]
+
+
+def option_display_values(config: dict[str, Any]) -> list[dict[str, str]]:
+    labels = config.get("option_labels", {})
+    return [{"value": option, "label": labels.get(option, option)} for option in config["options"]]
 
 
 def build_payload(args: argparse.Namespace) -> dict[str, Any]:
@@ -335,6 +368,7 @@ def workflow_result(state_path: Path, state: dict[str, Any]) -> dict[str, Any]:
                 "model": model,
                 "parameter": config["parameter"],
                 "options": config["options"],
+                "display_options": option_display_values(config),
                 "default": config["default"],
             }
         )

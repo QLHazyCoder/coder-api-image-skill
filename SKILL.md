@@ -36,7 +36,7 @@ For automation, `CODER_API_KEY` takes precedence over the locally stored key. Re
 2. Read the JSON result and stop at every `status`; do not run the next command until the user has answered the required question.
    - `key_storage_decision`: ask whether the user wants local storage. GPT Image generation cannot proceed until a local key or `CODER_API_KEY` is available. If they confirm storage, run `--save-local-key --state <state>`; otherwise ask them to set `CODER_API_KEY` and start a new workflow.
    - `model_selection`: ask the user to select a **Built-In Model**. Present GPT Image 2 as default, but `default` is a user choice, never an agent assumption. Then run `--select-model --state <state> --model <exact-model-name>`.
-   - `layout_selection`: ask for the returned size or aspect-ratio options. If the user says `default`, infer portrait for vertical requests, landscape for banners or horizontal scenes, and square otherwise. Then run `--select-layout` with the exact returned parameter.
+   - `layout_selection`: ask for the returned size or aspect-ratio options. Use `display_options` for user-facing labels and send the corresponding raw `value` to `--select-layout`. If the user says `default`, infer portrait for vertical requests, landscape for banners or horizontal scenes, and square otherwise.
    - `ready`: run `--generate --state <state> --output-dir <output-dir>`. Each attempt has a fixed maximum wait of 120 seconds.
    - `retry_exhausted`: three attempts failed, or the error is deterministic and cannot benefit from a retry. Ask in the current chat whether the user wants another round. Only after confirmation run `--continue-retry --state <state>`, then run `--generate` again. Never continue automatically.
 
@@ -53,6 +53,8 @@ For automation, `CODER_API_KEY` takes precedence over the locally stored key. Re
 | `gemini-3.1-flash-image-4k` | aspect ratio | `1:1` |
 
 For a Gemini model ending in `-1k`, `-2k`, or `-4k`, never ask for or send a separate resolution. The suffix is the exact upstream model identity and locks the resolution.
+
+GPT Image 2 uses its `size` field as the actual output resolution. Present these display labels, but send only the value before the annotation: `auto`, `1024x1024 (1K)`, `1024x1536 (about 1.5K)`, `1536x1024 (about 1.5K)`, `1024x1792 (about 1.8K)`, `1792x1024 (about 1.8K)`, `2048x2048 (2K)`, `2560x1440 (about 2.5K)`, `1440x2560 (about 2.5K)`, `3840x2160 (4K)`, and `2160x3840 (4K)`. Do not send a separate `resolution` field for GPT Image 2.
 
 ## Commands
 

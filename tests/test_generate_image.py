@@ -153,6 +153,19 @@ class GenerateImageTest(unittest.TestCase):
             self.assertEqual(Path(output["file"]).read_bytes(), PNG_BYTES)
             self.assertEqual(output["mime_type"], "image/png")
 
+    def test_gpt_image_2_exposes_complete_sizes_with_display_resolution_labels(self) -> None:
+        catalog = next(item for item in generator.model_catalog_for_output() if item["model"] == "gpt-image-2")
+        self.assertEqual(catalog["options"], generator.GPT_IMAGE_2_SIZES)
+        self.assertIn({"value": "2048x2048", "label": "2048x2048 (2K)"}, catalog["display_options"])
+        self.assertIn({"value": "3840x2160", "label": "3840x2160 (4K)"}, catalog["display_options"])
+
+        begin = self.run_skill("--begin", "--prompt", "a landscape scene")
+        state_path = json.loads(begin.stdout)["state"]
+        layout = self.run_skill("--select-model", "--state", state_path, "--model", "gpt-image-2")
+        self.assertEqual(layout.returncode, 0, layout.stderr)
+        self.assertIn({"value": "2160x3840", "label": "2160x3840 (4K)"}, json.loads(layout.stdout)["display_options"])
+        generator.remove_workflow_state(Path(state_path))
+
     def test_gemini_model_name_and_resolution_suffix_are_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = self.run_workflow(

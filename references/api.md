@@ -12,7 +12,7 @@ Before configuring a key, tell the user to enable model limits and whitelist onl
 
 | Model | Request fields |
 | --- | --- |
-| `gpt-image-2` | `size`, `quality=auto`, `output_format=png` |
+| `gpt-image-2` | `size`, `quality=auto`, `output_format=png`; no separate `resolution` field |
 | `gemini-3.1-flash-image-1k` | `aspect_ratio`; no `resolution` |
 | `gemini-3.1-flash-image-2k` | `aspect_ratio`; no `resolution` |
 | `gemini-3.1-flash-image-4k` | `aspect_ratio`; no `resolution` |
@@ -20,6 +20,8 @@ Before configuring a key, tell the user to enable model limits and whitelist onl
 All requests use `n=1` and `response_format=b64_json`. The response may still contain either `data[0].b64_json` or `data[0].url`; the script handles both and honors `data[0].mime_type` when present.
 
 Do not change a selected model name. In particular, Gemini resolution suffixes are part of the upstream model identity.
+
+GPT Image 2 accepts these capability-listed sizes: `auto`, `1024x1024`, `1024x1536`, `1536x1024`, `1024x1792`, `1792x1024`, `2048x2048`, `2560x1440`, `1440x2560`, `3840x2160`, and `2160x3840`. The skill adds display-only K annotations for users; it submits the raw size value.
 
 ## Error Handling
 
