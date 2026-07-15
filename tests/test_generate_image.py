@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import base64
+import contextlib
+import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -10,11 +13,14 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "generate_image.py"
 PNG_BYTES = b"\x89PNG\r\n\x1a\nmock-image"
+sys.path.insert(0, str(ROOT / "scripts"))
+import generate_image as generator
 
 
 class MockCoderAPIHandler(BaseHTTPRequestHandler):
@@ -73,6 +79,7 @@ class GenerateImageTest(unittest.TestCase):
     def run_skill(self, *args: str, with_key: bool = True) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["CODER_API_BASE_URL"] = MockCoderAPIHandler.base_url + "/v1"
+        env["CODER_API_CONFIG_PATH"] = str(ROOT / "tests" / "missing-credentials.json")
         if with_key:
             env["CODER_API_KEY"] = "test-key"
         else:
@@ -144,8 +151,29 @@ class GenerateImageTest(unittest.TestCase):
     def test_missing_key_fails_before_a_request(self) -> None:
         result = self.run_skill("--prompt", "a cat", with_key=False)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("CODER_API_KEY is not set", result.stderr)
+        self.assertIn("no API key found", result.stderr)
         self.assertEqual(MockCoderAPIHandler.requests, [])
+
+    def test_configure_stores_key_with_private_permissions_without_network_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "private" / "credentials.json"
+            output = io.StringIO()
+            with patch("generate_image.getpass.getpass", return_value="configured-test-key"), contextlib.redirect_stdout(output):
+                generator.configure_api_key(config_path)
+            self.assertEqual(generator.read_local_api_key(config_path), "configured-test-key")
+            self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
+            self.assertIn("enable model limits", output.getvalue())
+
+    def test_environment_key_takes_precedence_over_local_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "credentials.json"
+            generator.write_local_api_key(config_path, "saved-key")
+            with patch.dict(
+                os.environ,
+                {"CODER_API_KEY": "environment-key", "CODER_API_CONFIG_PATH": str(config_path)},
+                clear=False,
+            ):
+                self.assertEqual(generator.read_api_key(), "environment-key")
 
 
 if __name__ == "__main__":

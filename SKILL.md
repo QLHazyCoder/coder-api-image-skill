@@ -5,7 +5,21 @@ description: Generate images through Coder API for users who provide a Coder API
 
 # Coder API Image
 
-Generate one image through `https://api.qlhazycoder.tech/v1` with the user's `CODER_API_KEY` environment variable. Never ask for or print the key in chat, commands, files, or logs.
+Generate one image through `https://api.qlhazycoder.tech/v1`. Store the user's key only through the script's hidden `--configure` prompt; never ask for or print the key in chat, commands, files, or logs.
+
+## First-Time Setup
+
+When no API key is available, ask the user whether they want to configure it locally, then run:
+
+```bash
+python3 scripts/generate_image.py --configure
+```
+
+The script stores the key outside the Skill and repository at `~/.config/coder-api-image/credentials.json` with permissions `0600`. It does not validate the key during setup.
+
+Before asking the user to enter a key, explicitly remind them to enable model limits for that key and allow only the models they intend to use. Recommend an IP allowlist only when the Codex machine has a stable public egress IP; dynamic home or mobile IPs can otherwise cause avoidable authorization failures.
+
+For automation, `CODER_API_KEY` takes precedence over the locally stored key. Remove a saved key with `python3 scripts/generate_image.py --remove-key`.
 
 ## Workflow
 

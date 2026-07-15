@@ -1,6 +1,12 @@
 # Coder API Image Contract
 
-The script posts one JSON request to `POST /v1/images/generations` using `Authorization: Bearer $CODER_API_KEY`.
+The script posts one JSON request to `POST /v1/images/generations` using an API key from `CODER_API_KEY` or the local private config created by `--configure`.
+
+## Local Credential Storage
+
+`python3 scripts/generate_image.py --configure` reads the key with hidden terminal input and writes `~/.config/coder-api-image/credentials.json` with mode `0600`. It performs no network validation and never stores a key in the Skill directory or repository.
+
+Before configuring a key, tell the user to enable model limits and whitelist only the needed models. An IP allowlist is optional and appropriate only for a stable Codex egress IP. The standard image API cannot safely report whether those account-level restrictions are enabled, so the Skill only reminds the user.
 
 ## Built-In Model Parameters
 

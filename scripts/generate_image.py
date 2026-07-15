@@ -7,6 +7,7 @@ import argparse
 import base64
 import binascii
 import datetime as dt
+import getpass
 import json
 import os
 import sys
@@ -20,6 +21,7 @@ from typing import Any
 DEFAULT_BASE_URL = "https://api.qlhazycoder.tech/v1"
 DEFAULT_MODEL = "gpt-image-2"
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
+CONFIG_ENV_VAR = "CODER_API_CONFIG_PATH"
 
 MODEL_CATALOG: dict[str, dict[str, Any]] = {
     "gpt-image-2": {
@@ -66,6 +68,9 @@ class SkillError(Exception):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list-models", action="store_true", help="print the built-in model catalog")
+    parser.add_argument("--configure", action="store_true", help="save an API key in the local private config")
+    parser.add_argument("--remove-key", action="store_true", help="delete the locally saved API key")
+    parser.add_argument("--show-config-path", action="store_true", help="print the local private config path")
     parser.add_argument("--prompt", help="image prompt")
     parser.add_argument("--model", choices=sorted(MODEL_CATALOG), default=DEFAULT_MODEL)
     parser.add_argument("--size", help="GPT Image 2 size")
@@ -135,11 +140,76 @@ def api_base_url() -> str:
     return base_url
 
 
+def local_config_path() -> Path:
+    configured_path = os.environ.get(CONFIG_ENV_VAR, "").strip()
+    if configured_path:
+        return Path(configured_path).expanduser()
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return config_home / "coder-api-image" / "credentials.json"
+
+
+def write_local_api_key(config_path: Path, api_key: str) -> None:
+    if not api_key:
+        raise SkillError("API key cannot be empty")
+    config_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(config_path.parent, 0o700)
+    temporary_path = config_path.with_name(f".{config_path.name}.{os.getpid()}.tmp")
+    try:
+        descriptor = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as config_file:
+            json.dump({"api_key": api_key}, config_file)
+            config_file.write("\n")
+        os.replace(temporary_path, config_path)
+        os.chmod(config_path, 0o600)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def read_local_api_key(config_path: Path) -> str:
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return ""
+    except (OSError, json.JSONDecodeError) as error:
+        raise SkillError(f"local API key config is invalid; run --configure ({error})") from error
+    api_key = config.get("api_key") if isinstance(config, dict) else ""
+    if not isinstance(api_key, str):
+        raise SkillError("local API key config is invalid; run --configure")
+    return api_key.strip()
+
+
+def security_reminder() -> str:
+    return (
+        "Security reminder: enable model limits for this key and allow only the models you intend to use. "
+        "Optionally enable an IP allowlist when this Codex machine has a stable public egress IP. "
+        "A changing home or mobile IP can otherwise lock the skill out."
+    )
+
+
+def configure_api_key(config_path: Path) -> None:
+    api_key = getpass.getpass("Coder API key (stored locally with mode 0600): ").strip()
+    write_local_api_key(config_path, api_key)
+    print(f"Saved local API key to {config_path}")
+    print(security_reminder())
+
+
+def remove_local_api_key(config_path: Path) -> None:
+    try:
+        config_path.unlink()
+    except FileNotFoundError:
+        print(f"No local API key was stored at {config_path}")
+        return
+    print(f"Removed local API key from {config_path}")
+
+
 def read_api_key() -> str:
     api_key = os.environ.get("CODER_API_KEY", "").strip()
-    if not api_key:
-        raise SkillError("CODER_API_KEY is not set")
-    return api_key
+    if api_key:
+        return api_key
+    api_key = read_local_api_key(local_config_path())
+    if api_key:
+        return api_key
+    raise SkillError("no API key found; run --configure or set CODER_API_KEY")
 
 
 def api_error_message(body: bytes) -> str:
@@ -280,11 +350,24 @@ def save_first_image(response: dict[str, Any], output_dir: Path, output: str | N
 
 def main() -> int:
     args = parse_args()
-    if args.list_models:
-        print(json.dumps({"default_model": DEFAULT_MODEL, "models": model_catalog_for_output()}, ensure_ascii=False, indent=2))
-        return 0
-
     try:
+        if args.list_models:
+            print(json.dumps({"default_model": DEFAULT_MODEL, "models": model_catalog_for_output()}, ensure_ascii=False, indent=2))
+            return 0
+        config_path = local_config_path()
+        if args.show_config_path:
+            print(config_path)
+            return 0
+        if args.configure:
+            if args.remove_key or args.prompt:
+                raise SkillError("--configure cannot be combined with --remove-key or --prompt")
+            configure_api_key(config_path)
+            return 0
+        if args.remove_key:
+            if args.prompt:
+                raise SkillError("--remove-key cannot be combined with --prompt")
+            remove_local_api_key(config_path)
+            return 0
         payload = build_payload(args)
         base_url = api_base_url()
         response = post_generation(payload, read_api_key(), base_url, args.timeout)
