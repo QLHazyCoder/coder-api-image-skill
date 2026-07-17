@@ -7,9 +7,9 @@ import argparse
 import base64
 import binascii
 import datetime as dt
-import getpass
 import json
 import os
+import secrets
 import sys
 import tempfile
 import time
@@ -128,12 +128,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--show-config-path", action="store_true", help="print the local private config path")
     parser.add_argument("--begin", action="store_true", help="start an image-generation workflow")
     parser.add_argument("--save-local-key", action="store_true", help="save a key for a workflow after user confirmation")
+    parser.add_argument("--api-key", help="API key to save automatically from the conversation")
     parser.add_argument("--select-model", action="store_true", help="record a model choice for a workflow")
     parser.add_argument("--select-layout", action="store_true", help="record a layout choice for a workflow")
     parser.add_argument("--generate", action="store_true", help="generate from a ready workflow")
     parser.add_argument("--continue-retry", action="store_true", help="start another retry round after user confirmation")
     parser.add_argument("--state", help="workflow state file returned by --begin")
     parser.add_argument("--prompt", help="image prompt")
+    parser.add_argument("--image", help="local input image for a GPT Image 2 edit workflow")
     parser.add_argument("--model", choices=sorted(MODEL_CATALOG), help="explicit model choice")
     parser.add_argument("--size", help="GPT Image 2 size")
     parser.add_argument("--aspect-ratio", help="Gemini aspect ratio")
@@ -265,8 +267,8 @@ def security_reminder() -> str:
     )
 
 
-def configure_api_key(config_path: Path, emit_reminder: bool = True) -> None:
-    api_key = getpass.getpass("Coder API key (stored locally with mode 0600): ").strip()
+def configure_api_key(config_path: Path, api_key: str, emit_reminder: bool = True) -> None:
+    api_key = api_key.strip()
     write_local_api_key(config_path, api_key)
     if emit_reminder:
         print(f"Saved local API key to {config_path}")
@@ -296,9 +298,10 @@ def write_private_json(path: Path, payload: dict[str, Any]) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
-def create_workflow_state(prompt: str) -> Path:
+def create_workflow_state(prompt: str, input_image: str | None = None) -> Path:
     if not prompt.strip():
         raise SkillError("--prompt is required with --begin")
+    validated_input_image = validate_edit_input(Path(input_image)) if input_image else None
     environment_key = os.environ.get("CODER_API_KEY", "").strip()
     key_available = bool(environment_key or read_local_api_key(local_config_path()))
     state_directory = Path(tempfile.mkdtemp(prefix="coder-api-image-"))
@@ -309,7 +312,10 @@ def create_workflow_state(prompt: str) -> Path:
         "prompt": prompt.strip(),
         "status": "model_selection" if key_available else "key_storage_decision",
         "local_key_saved": False,
+        "operation": "edit" if validated_input_image else "generate",
     }
+    if validated_input_image:
+        state["image_path"] = str(validated_input_image)
     write_private_json(state_path, state)
     return state_path
 
@@ -343,7 +349,7 @@ def require_state_path(args: argparse.Namespace) -> Path:
 
 def workflow_result(state_path: Path, state: dict[str, Any]) -> dict[str, Any]:
     status = state["status"]
-    result: dict[str, Any] = {"state": str(state_path), "status": status}
+    result: dict[str, Any] = {"state": str(state_path), "status": status, "operation": state.get("operation", "generate")}
     if status == "key_storage_decision":
         result.update(
             {
@@ -392,7 +398,9 @@ def save_local_key_for_workflow(args: argparse.Namespace) -> dict[str, Any]:
     state = read_workflow_state(state_path)
     if state["status"] != "key_storage_decision":
         raise SkillError("local key storage is not the next workflow step")
-    configure_api_key(local_config_path(), emit_reminder=False)
+    if not args.api_key:
+        raise SkillError("--save-local-key requires --api-key")
+    configure_api_key(local_config_path(), args.api_key, emit_reminder=False)
     state["local_key_saved"] = True
     state["status"] = "model_selection"
     write_private_json(state_path, state)
@@ -406,6 +414,8 @@ def select_workflow_model(args: argparse.Namespace) -> dict[str, Any]:
         raise SkillError("model selection is not the next workflow step")
     if not args.model:
         raise SkillError("--model is required with --select-model")
+    if state.get("operation") == "edit" and args.model != "gpt-image-2":
+        raise SkillError("image editing currently supports gpt-image-2 only")
     state["model"] = args.model
     state["status"] = "layout_selection"
     write_private_json(state_path, state)
@@ -474,13 +484,19 @@ def api_error_message(body: bytes) -> str:
     return "upstream returned an unrecognized error response"
 
 
-def post_generation(payload: dict[str, Any], api_key: str, base_url: str, timeout: int) -> dict[str, Any]:
+def post_image_request(
+    endpoint: str,
+    request_data: bytes,
+    content_type: str,
+    api_key: str,
+    timeout: int,
+) -> dict[str, Any]:
     request = urllib.request.Request(
-        f"{base_url}/images/generations",
-        data=json.dumps(payload).encode("utf-8"),
+        endpoint,
+        data=request_data,
         headers={
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
+            "Content-Type": content_type,
             "Accept": "application/json",
         },
         method="POST",
@@ -508,6 +524,16 @@ def post_generation(payload: dict[str, Any], api_key: str, base_url: str, timeou
     if not isinstance(decoded, dict):
         raise GenerationError("generation response was not an object", retryable=True)
     return decoded
+
+
+def post_generation(payload: dict[str, Any], api_key: str, base_url: str, timeout: int) -> dict[str, Any]:
+    return post_image_request(
+        f"{base_url}/images/generations",
+        json.dumps(payload).encode("utf-8"),
+        "application/json",
+        api_key,
+        timeout,
+    )
 
 
 def is_local_url(url: str) -> bool:
@@ -542,6 +568,58 @@ def inferred_mime_type(image_bytes: bytes, declared_mime_type: str) -> str:
     if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
         return "image/webp"
     return "application/octet-stream"
+
+
+def validate_edit_input(input_path: Path) -> Path:
+    resolved_path = input_path.expanduser().resolve()
+    if not resolved_path.is_file():
+        raise SkillError("--image must reference a readable local file")
+    size = resolved_path.stat().st_size
+    if size <= 0 or size > MAX_IMAGE_BYTES:
+        raise SkillError("--image must be between 1 byte and 50 MiB")
+    with resolved_path.open("rb") as input_file:
+        header = input_file.read(12)
+    mime_type = inferred_mime_type(header, "")
+    if mime_type not in {"image/png", "image/jpeg", "image/webp"}:
+        raise SkillError("--image must be a PNG, JPEG, or WebP file")
+    return resolved_path
+
+
+def build_edit_multipart(payload: dict[str, Any], image_path: Path) -> tuple[bytes, str]:
+    image_path = validate_edit_input(image_path)
+    image_bytes = image_path.read_bytes()
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise SkillError("--image exceeds the 50 MiB safety limit")
+    mime_type = inferred_mime_type(image_bytes, "")
+    if mime_type not in {"image/png", "image/jpeg", "image/webp"}:
+        raise SkillError("--image must be a PNG, JPEG, or WebP file")
+    boundary = f"----CoderAPIImageEdit{secrets.token_hex(16)}"
+    body = bytearray()
+
+    def append_field(name: str, value: str) -> None:
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("ascii"))
+        body.extend(value.encode("utf-8"))
+        body.extend(b"\r\n")
+
+    for name, value in payload.items():
+        append_field(name, str(value))
+
+    extension = MIME_EXTENSIONS[mime_type]
+    body.extend(f"--{boundary}\r\n".encode("ascii"))
+    body.extend(
+        f'Content-Disposition: form-data; name="image"; filename="input{extension}"\r\n'.encode("ascii")
+    )
+    body.extend(f"Content-Type: {mime_type}\r\n\r\n".encode("ascii"))
+    body.extend(image_bytes)
+    body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("ascii"))
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
+def post_image_edit(payload: dict[str, Any], image_path: Path, api_key: str, base_url: str, timeout: int) -> dict[str, Any]:
+    request_data, content_type = build_edit_multipart(payload, image_path)
+    return post_image_request(f"{base_url}/images/edits", request_data, content_type, api_key, timeout)
 
 
 def unique_output_path(output_dir: Path, output: str | None, extension: str) -> Path:
@@ -607,10 +685,14 @@ def generate_with_retries(
     timeout: int,
     output_dir: Path,
     output: str | None,
+    edit_image_path: Path | None = None,
 ) -> tuple[Path, str, str]:
     for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1):
         try:
-            response = post_generation(payload, api_key, base_url, timeout)
+            if edit_image_path:
+                response = post_image_edit(payload, edit_image_path, api_key, base_url, timeout)
+            else:
+                response = post_generation(payload, api_key, base_url, timeout)
         except GenerationError as error:
             if not error.retryable or attempt == MAX_GENERATION_ATTEMPTS:
                 raise RetryExhausted(attempt, error) from error
@@ -645,6 +727,8 @@ def main() -> int:
         ]
         if sum(operations) != 1:
             raise SkillError("choose exactly one operation")
+        if args.image and not args.begin:
+            raise SkillError("--image is accepted only when starting a workflow with --begin")
         if args.list_models:
             print(json.dumps({"default_model": DEFAULT_MODEL, "models": model_catalog_for_output()}, ensure_ascii=False, indent=2))
             return 0
@@ -657,7 +741,9 @@ def main() -> int:
                 raise SkillError("--configure requires --confirm-local-storage")
             if args.prompt or args.state:
                 raise SkillError("--configure cannot be combined with --prompt or --state")
-            configure_api_key(config_path)
+            if not args.api_key:
+                raise SkillError("--configure requires --api-key")
+            configure_api_key(config_path, args.api_key)
             print(json.dumps({"configured": str(config_path), "security_reminder": security_reminder()}, ensure_ascii=False))
             return 0
         if args.remove_key:
@@ -666,7 +752,7 @@ def main() -> int:
             remove_local_api_key(config_path)
             return 0
         if args.begin:
-            state_path = create_workflow_state(args.prompt or "")
+            state_path = create_workflow_state(args.prompt or "", args.image)
             print(json.dumps(workflow_result(state_path, read_workflow_state(state_path)), ensure_ascii=False))
             return 0
         if args.save_local_key:
@@ -683,6 +769,8 @@ def main() -> int:
             return 0
 
         state_path = require_state_path(args)
+        if args.image:
+            raise SkillError("--image is accepted only when starting a workflow with --begin")
         state = read_workflow_state(state_path)
         if state["status"] != "ready":
             raise SkillError(f"workflow is not ready to generate; next step is {state['status']}")
@@ -697,6 +785,14 @@ def main() -> int:
             timeout=args.timeout,
         )
         payload = build_payload(generation_args)
+        edit_image_path: Path | None = None
+        if state.get("operation") == "edit":
+            if state.get("model") != "gpt-image-2":
+                raise SkillError("image editing currently supports gpt-image-2 only")
+            image_path = state.get("image_path")
+            if not isinstance(image_path, str):
+                raise SkillError("image edit workflow is missing its input image")
+            edit_image_path = validate_edit_input(Path(image_path))
         base_url = api_base_url()
         try:
             output_path, mime_type, revised_prompt = generate_with_retries(
@@ -706,6 +802,7 @@ def main() -> int:
                 args.timeout,
                 Path(args.output_dir),
                 args.output,
+                edit_image_path,
             )
         except RetryExhausted as error:
             state["status"] = "retry_exhausted"
@@ -717,7 +814,12 @@ def main() -> int:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
-    result = {"file": str(output_path), "model": payload["model"], "mime_type": mime_type}
+    result = {
+        "file": str(output_path),
+        "model": payload["model"],
+        "mime_type": mime_type,
+        "operation": state.get("operation", "generate"),
+    }
     if revised_prompt:
         result["revised_prompt"] = revised_prompt
     if state.get("local_key_saved"):

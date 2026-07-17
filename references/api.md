@@ -1,10 +1,10 @@
 # Coder API Image Contract
 
-The script posts one JSON request to `POST /v1/images/generations` using an API key from `CODER_API_KEY` or the local private config created by `--configure`.
+The script posts text-to-image JSON requests to `POST /v1/images/generations` and GPT Image 2 edit multipart requests to `POST /v1/images/edits`, using an API key from `CODER_API_KEY` or the local private config created by `--configure`.
 
 ## Local Credential Storage
 
-`python3 scripts/generate_image.py --configure` reads the key with hidden terminal input and writes `~/.config/coder-api-image/credentials.json` with mode `0600`. It performs no network validation and never stores a key in the Skill directory or repository.
+`python3 scripts/generate_image.py --configure --confirm-local-storage --api-key "<key>"` writes `~/.config/coder-api-image/credentials.json` with mode `0600`. It performs no network validation and never stores a key in the Skill directory or repository. A key supplied in the conversation is saved automatically by the skill, with no second interactive paste.
 
 Before configuring a key, tell the user to enable model limits and whitelist only the needed models. An IP allowlist is optional and appropriate only for a stable Codex egress IP. The standard image API cannot safely report whether those account-level restrictions are enabled, so the Skill only reminds the user.
 
@@ -18,6 +18,10 @@ Before configuring a key, tell the user to enable model limits and whitelist onl
 | `gemini-3.1-flash-image-4k` | `aspect_ratio`; no `resolution` |
 
 All requests use `n=1` and `response_format=b64_json`. The response may still contain either `data[0].b64_json` or `data[0].url`; the script handles both and honors `data[0].mime_type` when present.
+
+## Image Editing
+
+Image editing currently supports `gpt-image-2` only. The script sends `model`, `prompt`, `n`, `response_format`, `size`, `quality`, and `output_format` as multipart fields, plus one `image` file part. Input files must be a local PNG, JPEG, or WebP no larger than 50 MiB. The attachment is sent directly in the API request and is not copied to project storage.
 
 Do not change a selected model name. In particular, Gemini resolution suffixes are part of the upstream model identity.
 

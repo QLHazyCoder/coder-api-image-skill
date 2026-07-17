@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import base64
-import contextlib
+from email import policy
+from email.parser import BytesParser
 import io
 import json
 import os
@@ -35,7 +36,25 @@ class MockCoderAPIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         length = int(self.headers["Content-Length"])
-        payload = json.loads(self.rfile.read(length))
+        request_body = self.rfile.read(length)
+        content_type = self.headers.get("Content-Type", "")
+        if content_type.startswith("application/json"):
+            payload = json.loads(request_body)
+        else:
+            message = BytesParser(policy=policy.default).parsebytes(
+                f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("ascii") + request_body
+            )
+            payload = {"_content_type": content_type}
+            for part in message.iter_parts():
+                name = part.get_param("name", header="content-disposition")
+                if not name:
+                    continue
+                value = part.get_payload(decode=True)
+                if name == "image":
+                    payload["_image_bytes"] = value
+                    payload["_image_content_type"] = part.get_content_type()
+                else:
+                    payload[name] = value.decode("utf-8")
         self.__class__.requests.append(payload)
         if self.__class__.failures_remaining:
             self.__class__.failures_remaining -= 1
@@ -88,10 +107,15 @@ class GenerateImageTest(unittest.TestCase):
         MockCoderAPIHandler.response_mode = "b64"
         MockCoderAPIHandler.failures_remaining = 0
 
-    def run_skill(self, *args: str, with_key: bool = True) -> subprocess.CompletedProcess[str]:
+    def run_skill(
+        self,
+        *args: str,
+        with_key: bool = True,
+        config_path: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["CODER_API_BASE_URL"] = MockCoderAPIHandler.base_url + "/v1"
-        env["CODER_API_CONFIG_PATH"] = str(ROOT / "tests" / "missing-credentials.json")
+        env["CODER_API_CONFIG_PATH"] = str(config_path or ROOT / "tests" / "missing-credentials.json")
         if with_key:
             env["CODER_API_KEY"] = "test-key"
         else:
@@ -110,8 +134,12 @@ class GenerateImageTest(unittest.TestCase):
         prompt: str,
         model: str,
         layout_option: str,
+        input_image: str | None = None,
     ) -> str:
-        begin = self.run_skill("--begin", "--prompt", prompt)
+        begin_args = ["--begin", "--prompt", prompt]
+        if input_image:
+            begin_args.extend(["--image", input_image])
+        begin = self.run_skill(*begin_args)
         self.assertEqual(begin.returncode, 0, begin.stderr)
         state_path = json.loads(begin.stdout)["state"]
 
@@ -130,8 +158,9 @@ class GenerateImageTest(unittest.TestCase):
         layout_option: str,
         output_dir: str,
         output: str | None = None,
+        input_image: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        state_path = self.prepare_ready_workflow(prompt, model, layout_option)
+        state_path = self.prepare_ready_workflow(prompt, model, layout_option, input_image)
         command = ["--generate", "--state", state_path, "--output-dir", output_dir]
         if output:
             command.extend(["--output", output])
@@ -152,6 +181,50 @@ class GenerateImageTest(unittest.TestCase):
             output = json.loads(result.stdout)
             self.assertEqual(Path(output["file"]).read_bytes(), PNG_BYTES)
             self.assertEqual(output["mime_type"], "image/png")
+
+    def test_gpt_image_edit_uploads_a_local_attachment_as_multipart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = Path(directory) / "reference.png"
+            input_path.write_bytes(PNG_BYTES)
+            result = self.run_workflow(
+                "replace the background with a night city",
+                "gpt-image-2",
+                "1024x1024",
+                directory,
+                input_image=str(input_path),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            request = MockCoderAPIHandler.requests[0]
+            self.assertTrue(request["_content_type"].startswith("multipart/form-data; boundary="))
+            self.assertEqual(request["model"], "gpt-image-2")
+            self.assertEqual(request["size"], "1024x1024")
+            self.assertEqual(request["response_format"], "b64_json")
+            self.assertEqual(request["_image_bytes"], PNG_BYTES)
+            self.assertEqual(request["_image_content_type"], "image/png")
+            self.assertEqual(json.loads(result.stdout)["operation"], "edit")
+
+    def test_image_edit_rejects_non_image_input_and_non_gpt_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            invalid_path = Path(directory) / "not-an-image.txt"
+            invalid_path.write_text("not an image", encoding="utf-8")
+            invalid = self.run_skill("--begin", "--prompt", "edit this", "--image", str(invalid_path))
+            self.assertEqual(invalid.returncode, 1)
+            self.assertIn("must be a PNG, JPEG, or WebP", invalid.stderr)
+
+            input_path = Path(directory) / "reference.png"
+            input_path.write_bytes(PNG_BYTES)
+            begin = self.run_skill("--begin", "--prompt", "edit this", "--image", str(input_path))
+            state_path = json.loads(begin.stdout)["state"]
+            unsupported = self.run_skill(
+                "--select-model",
+                "--state",
+                state_path,
+                "--model",
+                "gemini-3.1-flash-image-1k",
+            )
+            self.assertEqual(unsupported.returncode, 1)
+            self.assertIn("gpt-image-2 only", unsupported.stderr)
+            generator.remove_workflow_state(Path(state_path))
 
     def test_gpt_image_2_exposes_complete_sizes_with_display_resolution_labels(self) -> None:
         catalog = next(item for item in generator.model_catalog_for_output() if item["model"] == "gpt-image-2")
@@ -256,15 +329,35 @@ class GenerateImageTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("between 1 and 120 seconds", result.stderr)
 
-    def test_configure_stores_key_with_private_permissions_without_network_validation(self) -> None:
+    def test_configure_stores_chat_key_with_private_permissions_without_network_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "private" / "credentials.json"
-            output = io.StringIO()
-            with patch("generate_image.getpass.getpass", return_value="configured-test-key"), contextlib.redirect_stdout(output):
-                generator.configure_api_key(config_path)
+            generator.configure_api_key(config_path, "configured-test-key", emit_reminder=False)
             self.assertEqual(generator.read_local_api_key(config_path), "configured-test-key")
             self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
-            self.assertIn("enable model limits", output.getvalue())
+
+    def test_workflow_saves_chat_key_without_interactive_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "private" / "credentials.json"
+            begin = self.run_skill("--begin", "--prompt", "a cat", with_key=False, config_path=config_path)
+            self.assertEqual(begin.returncode, 0, begin.stderr)
+            workflow = json.loads(begin.stdout)
+            self.assertEqual(workflow["status"], "key_storage_decision")
+
+            saved = self.run_skill(
+                "--save-local-key",
+                "--state",
+                workflow["state"],
+                "--api-key",
+                "chat-provided-key",
+                with_key=False,
+                config_path=config_path,
+            )
+            self.assertEqual(saved.returncode, 0, saved.stderr)
+            self.assertEqual(json.loads(saved.stdout)["status"], "model_selection")
+            self.assertEqual(generator.read_local_api_key(config_path), "chat-provided-key")
+            self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
+            generator.remove_workflow_state(Path(workflow["state"]))
 
     def test_environment_key_takes_precedence_over_local_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -279,7 +372,8 @@ class GenerateImageTest(unittest.TestCase):
 
     def test_skill_requires_key_save_offer_and_model_choice(self) -> None:
         instructions = (ROOT / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("ask whether they want to save it locally before generating", instructions)
+        self.assertIn("save it locally automatically and continue the workflow", instructions)
+        self.assertIn("Do not ask the user to paste the same key again", instructions)
         self.assertIn("`default` is a user choice, never an agent assumption", instructions)
         self.assertIn("Do not invoke the system `imagegen` skill", instructions)
         self.assertIn("If the JSON result contains `security_reminder`", instructions)
