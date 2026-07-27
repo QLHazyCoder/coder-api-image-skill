@@ -13,9 +13,8 @@ Before configuring a key, tell the user to enable model limits and whitelist onl
 | Model | Request fields |
 | --- | --- |
 | `gpt-image-2` | `size`, `quality=auto`, `output_format=png`; no separate `resolution` field |
-| `gemini-3.1-flash-image-1k` | `aspect_ratio`; no `resolution` |
-| `gemini-3.1-flash-image-2k` | `aspect_ratio`; no `resolution` |
-| `gemini-3.1-flash-image-4k` | `aspect_ratio`; no `resolution` |
+| `gemini-3-pro-image-preview` | `aspect_ratio`, `resolution` (`1K`, `2K`, or `4K`) |
+| `gemini-3.1-flash-image-preview` | `aspect_ratio`, `resolution` (`1K`, `2K`, or `4K`) |
 
 All requests use `n=1` and `response_format=b64_json`. The response may still contain either `data[0].b64_json` or `data[0].url`; the script handles both and honors `data[0].mime_type` when present.
 
@@ -23,9 +22,11 @@ All requests use `n=1` and `response_format=b64_json`. The response may still co
 
 Image editing currently supports `gpt-image-2` only. The script sends `model`, `prompt`, `n`, `response_format`, `size`, `quality`, and `output_format` as multipart fields, plus one `image` file part. Input files must be a local PNG, JPEG, or WebP no larger than 50 MiB. The attachment is sent directly in the API request and is not copied to project storage.
 
-Do not change a selected model name. In particular, Gemini resolution suffixes are part of the upstream model identity.
+Do not change a selected model name. The Skill submits the exact catalog name; it never normalizes or appends a suffix.
 
 GPT Image 2 accepts these capability-listed sizes: `auto`, `1024x1024`, `1024x1536`, `1536x1024`, `1024x1792`, `1792x1024`, `2048x2048`, `2560x1440`, `1440x2560`, `3840x2160`, and `2160x3840`. The skill adds display-only K annotations for users; it submits the raw size value.
+
+Both hardcoded Gemini models support these aspect ratios: `1:1`, `1:4`, `1:8`, `2:3`, `3:2`, `3:4`, `4:1`, `4:3`, `4:5`, `5:4`, `8:1`, `9:16`, `16:9`, and `21:9`. Their `resolution` is separately required and restricted to `1K`, `2K`, or `4K`.
 
 ## Error Handling
 

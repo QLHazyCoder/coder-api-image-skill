@@ -134,6 +134,7 @@ class GenerateImageTest(unittest.TestCase):
         prompt: str,
         model: str,
         layout_option: str,
+        resolution: str | None = None,
         input_image: str | None = None,
     ) -> str:
         begin_args = ["--begin", "--prompt", prompt]
@@ -143,12 +144,31 @@ class GenerateImageTest(unittest.TestCase):
         self.assertEqual(begin.returncode, 0, begin.stderr)
         state_path = json.loads(begin.stdout)["state"]
 
-        select_model = self.run_skill("--select-model", "--state", state_path, "--model", model)
-        self.assertEqual(select_model.returncode, 0, select_model.stderr)
-
-        layout_argument = "--size" if model == "gpt-image-2" else "--aspect-ratio"
-        select_layout = self.run_skill("--select-layout", "--state", state_path, layout_argument, layout_option)
-        self.assertEqual(select_layout.returncode, 0, select_layout.stderr)
+        if model == "gpt-image-2":
+            configuration_command = [
+                "--select-configuration",
+                "--state",
+                state_path,
+                "--model",
+                model,
+                "--size",
+                layout_option,
+            ]
+        else:
+            configuration_command = [
+                "--select-configuration",
+                "--state",
+                state_path,
+                "--model",
+                model,
+                "--aspect-ratio",
+                layout_option,
+                "--resolution",
+                resolution or "1K",
+            ]
+        configured = self.run_skill(*configuration_command)
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+        self.assertEqual(json.loads(configured.stdout)["status"], "ready")
         return state_path
 
     def run_workflow(
@@ -158,9 +178,10 @@ class GenerateImageTest(unittest.TestCase):
         layout_option: str,
         output_dir: str,
         output: str | None = None,
+        resolution: str | None = None,
         input_image: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        state_path = self.prepare_ready_workflow(prompt, model, layout_option, input_image)
+        state_path = self.prepare_ready_workflow(prompt, model, layout_option, resolution, input_image)
         command = ["--generate", "--state", state_path, "--output-dir", output_dir]
         if output:
             command.extend(["--output", output])
@@ -220,7 +241,7 @@ class GenerateImageTest(unittest.TestCase):
                 "--state",
                 state_path,
                 "--model",
-                "gemini-3.1-flash-image-1k",
+                "gemini-3.1-flash-image-preview",
             )
             self.assertEqual(unsupported.returncode, 1)
             self.assertIn("gpt-image-2 only", unsupported.stderr)
@@ -239,20 +260,79 @@ class GenerateImageTest(unittest.TestCase):
         self.assertIn({"value": "2160x3840", "label": "2160x3840 (4K)"}, json.loads(layout.stdout)["display_options"])
         generator.remove_workflow_state(Path(state_path))
 
-    def test_gemini_model_name_and_resolution_suffix_are_preserved(self) -> None:
+    def test_complete_configuration_skips_the_intermediate_layout_question(self) -> None:
+        begin = self.run_skill("--begin", "--prompt", "a wide mountain scene")
+        self.assertEqual(begin.returncode, 0, begin.stderr)
+        workflow = json.loads(begin.stdout)
+        self.assertEqual(workflow["status"], "model_selection")
+        self.assertEqual(workflow["action"], "ask_user_to_choose_model_and_layout")
+
+        configured = self.run_skill(
+            "--select-configuration",
+            "--state",
+            workflow["state"],
+            "--model",
+            "gpt-image-2",
+            "--size",
+            "1536x1024",
+        )
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+        ready = json.loads(configured.stdout)
+        self.assertEqual(ready["status"], "ready")
+        self.assertEqual(ready["layout"], {"size": "1536x1024"})
+        generator.remove_workflow_state(Path(workflow["state"]))
+
+    def test_current_model_catalog_hardcodes_runtime_capabilities(self) -> None:
+        catalog = generator.model_catalog_for_output()
+        self.assertEqual(
+            [item["model"] for item in catalog],
+            ["gpt-image-2", "gemini-3-pro-image-preview", "gemini-3.1-flash-image-preview"],
+        )
+        for model in catalog[1:]:
+            self.assertEqual(model["parameter"], "aspect_ratio_resolution")
+            self.assertEqual(model["resolution_options"], ["1K", "2K", "4K"])
+            self.assertEqual(model["capabilities"]["aspect_ratios"], generator.GEMINI_NATIVE_IMAGE_ASPECT_RATIOS)
+            self.assertFalse(model["capabilities"]["supports_editing"])
+
+    def test_gemini_model_name_and_resolution_are_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = self.run_workflow(
                 "a mountain lake",
-                "gemini-3.1-flash-image-1k",
+                "gemini-3.1-flash-image-preview",
                 "16:9",
                 directory,
+                resolution="4K",
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = MockCoderAPIHandler.requests[0]
-            self.assertEqual(payload["model"], "gemini-3.1-flash-image-1k")
+            self.assertEqual(payload["model"], "gemini-3.1-flash-image-preview")
             self.assertEqual(payload["aspect_ratio"], "16:9")
-            self.assertNotIn("resolution", payload)
+            self.assertEqual(payload["resolution"], "4K")
             self.assertNotIn("size", payload)
+
+    def test_gemini_rejects_unsupported_resolution(self) -> None:
+        begin = self.run_skill("--begin", "--prompt", "a mountain lake")
+        state_path = json.loads(begin.stdout)["state"]
+        select_model = self.run_skill(
+            "--select-model",
+            "--state",
+            state_path,
+            "--model",
+            "gemini-3-pro-image-preview",
+        )
+        self.assertEqual(select_model.returncode, 0, select_model.stderr)
+        unsupported = self.run_skill(
+            "--select-layout",
+            "--state",
+            state_path,
+            "--aspect-ratio",
+            "16:9",
+            "--resolution",
+            "8K",
+        )
+        self.assertEqual(unsupported.returncode, 1)
+        self.assertIn("unsupported resolution", unsupported.stderr)
+        generator.remove_workflow_state(Path(state_path))
 
     def test_url_response_is_downloaded(self) -> None:
         MockCoderAPIHandler.response_mode = "url"
@@ -377,7 +457,8 @@ class GenerateImageTest(unittest.TestCase):
         self.assertIn("`default` is a user choice, never an agent assumption", instructions)
         self.assertIn("Do not invoke the system `imagegen` skill", instructions)
         self.assertIn("If the JSON result contains `security_reminder`", instructions)
-        self.assertIn("do not run the next command until the user has answered", instructions)
+        self.assertIn("Do not ask for model and layout in separate turns", instructions)
+        self.assertIn("--select-configuration", instructions)
 
     def test_successful_workflow_returns_security_reminder_after_local_key_save(self) -> None:
         descriptor, state_name = tempfile.mkstemp(prefix="coder-api-image-test-", suffix=".json")

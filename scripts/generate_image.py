@@ -24,7 +24,7 @@ DEFAULT_BASE_URL = "https://api.qlhazycoder.tech/v1"
 DEFAULT_MODEL = "gpt-image-2"
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
 CONFIG_ENV_VAR = "CODER_API_CONFIG_PATH"
-WORKFLOW_STATE_VERSION = 1
+WORKFLOW_STATE_VERSION = 2
 MAX_REQUEST_TIMEOUT_SECONDS = 120
 MAX_GENERATION_ATTEMPTS = 3
 RETRY_DELAYS_SECONDS = (1, 2)
@@ -55,6 +55,24 @@ GPT_IMAGE_2_SIZE_LABELS = {
     "2160x3840": "2160x3840 (4K)",
 }
 
+GEMINI_NATIVE_IMAGE_ASPECT_RATIOS = [
+    "1:1",
+    "1:4",
+    "1:8",
+    "2:3",
+    "3:2",
+    "3:4",
+    "4:1",
+    "4:3",
+    "4:5",
+    "5:4",
+    "8:1",
+    "9:16",
+    "16:9",
+    "21:9",
+]
+GEMINI_NATIVE_IMAGE_RESOLUTIONS = ["1K", "2K", "4K"]
+
 MODEL_CATALOG: dict[str, dict[str, Any]] = {
     "gpt-image-2": {
         "label": "GPT Image 2",
@@ -62,27 +80,76 @@ MODEL_CATALOG: dict[str, dict[str, Any]] = {
         "options": GPT_IMAGE_2_SIZES,
         "default": "1024x1024",
         "option_labels": GPT_IMAGE_2_SIZE_LABELS,
+        "capabilities": {
+            "provider": "openai",
+            "size_mode": "dimensions",
+            "sizes": GPT_IMAGE_2_SIZES,
+            "aspect_ratios": [],
+            "resolutions": [],
+            "qualities": ["auto", "low", "medium", "high"],
+            "output_formats": ["png", "jpeg", "webp"],
+            "default_size": "1024x1024",
+            "default_aspect_ratio": "",
+            "default_resolution": "",
+            "default_quality": "auto",
+            "default_output_format": "png",
+            "supports_editing": True,
+            "supports_moderation": True,
+            "supports_output_compression": True,
+            "max_images": 4,
+        },
     },
-    "gemini-3.1-flash-image-1k": {
-        "label": "Gemini 3.1 Flash Image 1K",
-        "parameter": "aspect_ratio",
-        "options": ["1:1", "16:9", "9:16"],
+    "gemini-3-pro-image-preview": {
+        "label": "Gemini 3 Pro Image Preview",
+        "parameter": "aspect_ratio_resolution",
+        "options": GEMINI_NATIVE_IMAGE_ASPECT_RATIOS,
         "default": "1:1",
-        "resolution_locked": "1K",
+        "resolution_options": GEMINI_NATIVE_IMAGE_RESOLUTIONS,
+        "default_resolution": "1K",
+        "capabilities": {
+            "provider": "gemini",
+            "size_mode": "aspect_ratio_resolution",
+            "sizes": [],
+            "aspect_ratios": GEMINI_NATIVE_IMAGE_ASPECT_RATIOS,
+            "resolutions": GEMINI_NATIVE_IMAGE_RESOLUTIONS,
+            "qualities": [],
+            "output_formats": [],
+            "default_size": "",
+            "default_aspect_ratio": "1:1",
+            "default_resolution": "1K",
+            "default_quality": "",
+            "default_output_format": "",
+            "supports_editing": False,
+            "supports_moderation": False,
+            "supports_output_compression": False,
+            "max_images": 4,
+        },
     },
-    "gemini-3.1-flash-image-2k": {
-        "label": "Gemini 3.1 Flash Image 2K",
-        "parameter": "aspect_ratio",
-        "options": ["1:1", "16:9", "9:16"],
+    "gemini-3.1-flash-image-preview": {
+        "label": "Gemini 3.1 Flash Image Preview",
+        "parameter": "aspect_ratio_resolution",
+        "options": GEMINI_NATIVE_IMAGE_ASPECT_RATIOS,
         "default": "1:1",
-        "resolution_locked": "2K",
-    },
-    "gemini-3.1-flash-image-4k": {
-        "label": "Gemini 3.1 Flash Image 4K",
-        "parameter": "aspect_ratio",
-        "options": ["1:1", "16:9", "9:16"],
-        "default": "1:1",
-        "resolution_locked": "4K",
+        "resolution_options": GEMINI_NATIVE_IMAGE_RESOLUTIONS,
+        "default_resolution": "1K",
+        "capabilities": {
+            "provider": "gemini",
+            "size_mode": "aspect_ratio_resolution",
+            "sizes": [],
+            "aspect_ratios": GEMINI_NATIVE_IMAGE_ASPECT_RATIOS,
+            "resolutions": GEMINI_NATIVE_IMAGE_RESOLUTIONS,
+            "qualities": [],
+            "output_formats": [],
+            "default_size": "",
+            "default_aspect_ratio": "1:1",
+            "default_resolution": "1K",
+            "default_quality": "",
+            "default_output_format": "",
+            "supports_editing": False,
+            "supports_moderation": False,
+            "supports_output_compression": False,
+            "max_images": 4,
+        },
     },
 }
 
@@ -129,6 +196,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--begin", action="store_true", help="start an image-generation workflow")
     parser.add_argument("--save-local-key", action="store_true", help="save a key for a workflow after user confirmation")
     parser.add_argument("--api-key", help="API key to save automatically from the conversation")
+    parser.add_argument(
+        "--select-configuration",
+        action="store_true",
+        help="record a complete model and layout choice for a workflow",
+    )
     parser.add_argument("--select-model", action="store_true", help="record a model choice for a workflow")
     parser.add_argument("--select-layout", action="store_true", help="record a layout choice for a workflow")
     parser.add_argument("--generate", action="store_true", help="generate from a ready workflow")
@@ -139,6 +211,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", choices=sorted(MODEL_CATALOG), help="explicit model choice")
     parser.add_argument("--size", help="GPT Image 2 size")
     parser.add_argument("--aspect-ratio", help="Gemini aspect ratio")
+    parser.add_argument("--resolution", help="Gemini image resolution")
     parser.add_argument("--output-dir", default=".", help="directory for the generated file")
     parser.add_argument("--output", help="optional output filename")
     parser.add_argument(
@@ -159,7 +232,9 @@ def model_catalog_for_output() -> list[dict[str, Any]]:
             "options": config["options"],
             "display_options": option_display_values(config),
             "default": config["default"],
-            "resolution_locked": config.get("resolution_locked"),
+            "resolution_options": config.get("resolution_options", []),
+            "default_resolution": config.get("default_resolution", ""),
+            "capabilities": config["capabilities"],
         }
         for model, config in MODEL_CATALOG.items()
     ]
@@ -188,8 +263,8 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     }
 
     if config["parameter"] == "size":
-        if args.aspect_ratio:
-            raise SkillError(f"{model} uses --size, not --aspect-ratio")
+        if args.aspect_ratio or args.resolution:
+            raise SkillError(f"{model} uses --size, not --aspect-ratio or --resolution")
         size = args.size
         if not size:
             raise SkillError(f"--size is required for {model}; select a layout through the workflow first")
@@ -201,13 +276,19 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         return payload
 
     if args.size:
-        raise SkillError(f"{model} uses --aspect-ratio, not --size")
+        raise SkillError(f"{model} uses --aspect-ratio and --resolution, not --size")
     aspect_ratio = args.aspect_ratio
     if not aspect_ratio:
         raise SkillError(f"--aspect-ratio is required for {model}; select a layout through the workflow first")
     if aspect_ratio not in config["options"]:
         raise SkillError(f"unsupported aspect ratio {aspect_ratio!r} for {model}")
+    resolution = args.resolution
+    if not resolution:
+        raise SkillError(f"--resolution is required for {model}; select a layout through the workflow first")
+    if resolution not in config["resolution_options"]:
+        raise SkillError(f"unsupported resolution {resolution!r} for {model}")
     payload["aspect_ratio"] = aspect_ratio
+    payload["resolution"] = resolution
     return payload
 
 
@@ -360,7 +441,7 @@ def workflow_result(state_path: Path, state: dict[str, Any]) -> dict[str, Any]:
     elif status == "model_selection":
         result.update(
             {
-                "action": "ask_user_to_choose_model",
+                "action": "ask_user_to_choose_model_and_layout",
                 "default_model": DEFAULT_MODEL,
                 "models": model_catalog_for_output(),
             }
@@ -368,16 +449,21 @@ def workflow_result(state_path: Path, state: dict[str, Any]) -> dict[str, Any]:
     elif status == "layout_selection":
         model = state["model"]
         config = MODEL_CATALOG[model]
-        result.update(
-            {
-                "action": "ask_user_to_choose_layout",
-                "model": model,
-                "parameter": config["parameter"],
-                "options": config["options"],
-                "display_options": option_display_values(config),
-                "default": config["default"],
-            }
-        )
+        result.update({
+            "action": "ask_user_to_choose_layout",
+            "model": model,
+            "parameter": config["parameter"],
+            "options": config["options"],
+            "display_options": option_display_values(config),
+            "default": config["default"],
+        })
+        if config["parameter"] == "aspect_ratio_resolution":
+            result.update(
+                {
+                    "resolution_options": config["resolution_options"],
+                    "default_resolution": config["default_resolution"],
+                }
+            )
     elif status == "ready":
         result.update({"action": "ready_to_generate", "model": state["model"], "layout": state["layout"]})
     elif status == "retry_exhausted":
@@ -407,16 +493,53 @@ def save_local_key_for_workflow(args: argparse.Namespace) -> dict[str, Any]:
     return workflow_result(state_path, state)
 
 
+def selected_model(state: dict[str, Any], args: argparse.Namespace) -> str:
+    if not args.model:
+        raise SkillError("--model is required")
+    if state.get("operation") == "edit" and args.model != "gpt-image-2":
+        raise SkillError("image editing currently supports gpt-image-2 only")
+    return args.model
+
+
+def selected_layout(model: Any, args: argparse.Namespace) -> dict[str, str]:
+    if model not in MODEL_CATALOG:
+        raise SkillError("workflow state has an invalid model")
+    config = MODEL_CATALOG[model]
+    if config["parameter"] == "size":
+        if args.aspect_ratio or args.resolution:
+            raise SkillError(f"{model} uses --size, not --aspect-ratio or --resolution")
+        if args.size not in config["options"]:
+            raise SkillError(f"unsupported size {args.size!r} for {model}")
+        return {"size": args.size}
+    else:
+        if args.size:
+            raise SkillError(f"{model} uses --aspect-ratio and --resolution, not --size")
+        if args.aspect_ratio not in config["options"]:
+            raise SkillError(f"unsupported aspect ratio {args.aspect_ratio!r} for {model}")
+        if args.resolution not in config["resolution_options"]:
+            raise SkillError(f"unsupported resolution {args.resolution!r} for {model}")
+        return {"aspect_ratio": args.aspect_ratio, "resolution": args.resolution}
+
+
+def select_workflow_configuration(args: argparse.Namespace) -> dict[str, Any]:
+    state_path = require_state_path(args)
+    state = read_workflow_state(state_path)
+    if state["status"] != "model_selection":
+        raise SkillError("model and layout selection is not the next workflow step")
+    model = selected_model(state, args)
+    state["model"] = model
+    state["layout"] = selected_layout(model, args)
+    state["status"] = "ready"
+    write_private_json(state_path, state)
+    return workflow_result(state_path, state)
+
+
 def select_workflow_model(args: argparse.Namespace) -> dict[str, Any]:
     state_path = require_state_path(args)
     state = read_workflow_state(state_path)
     if state["status"] != "model_selection":
         raise SkillError("model selection is not the next workflow step")
-    if not args.model:
-        raise SkillError("--model is required with --select-model")
-    if state.get("operation") == "edit" and args.model != "gpt-image-2":
-        raise SkillError("image editing currently supports gpt-image-2 only")
-    state["model"] = args.model
+    state["model"] = selected_model(state, args)
     state["status"] = "layout_selection"
     write_private_json(state_path, state)
     return workflow_result(state_path, state)
@@ -427,22 +550,7 @@ def select_workflow_layout(args: argparse.Namespace) -> dict[str, Any]:
     state = read_workflow_state(state_path)
     if state["status"] != "layout_selection":
         raise SkillError("layout selection is not the next workflow step")
-    model = state.get("model")
-    if model not in MODEL_CATALOG:
-        raise SkillError("workflow state has an invalid model")
-    config = MODEL_CATALOG[model]
-    if config["parameter"] == "size":
-        if args.aspect_ratio:
-            raise SkillError(f"{model} uses --size, not --aspect-ratio")
-        if args.size not in config["options"]:
-            raise SkillError(f"unsupported size {args.size!r} for {model}")
-        state["layout"] = {"size": args.size}
-    else:
-        if args.size:
-            raise SkillError(f"{model} uses --aspect-ratio, not --size")
-        if args.aspect_ratio not in config["options"]:
-            raise SkillError(f"unsupported aspect ratio {args.aspect_ratio!r} for {model}")
-        state["layout"] = {"aspect_ratio": args.aspect_ratio}
+    state["layout"] = selected_layout(state.get("model"), args)
     state["status"] = "ready"
     write_private_json(state_path, state)
     return workflow_result(state_path, state)
@@ -720,6 +828,7 @@ def main() -> int:
             args.show_config_path,
             args.begin,
             args.save_local_key,
+            args.select_configuration,
             args.select_model,
             args.select_layout,
             args.generate,
@@ -758,6 +867,9 @@ def main() -> int:
         if args.save_local_key:
             print(json.dumps(save_local_key_for_workflow(args), ensure_ascii=False))
             return 0
+        if args.select_configuration:
+            print(json.dumps(select_workflow_configuration(args), ensure_ascii=False))
+            return 0
         if args.select_model:
             print(json.dumps(select_workflow_model(args), ensure_ascii=False))
             return 0
@@ -782,6 +894,7 @@ def main() -> int:
             model=state.get("model"),
             size=layout.get("size"),
             aspect_ratio=layout.get("aspect_ratio"),
+            resolution=layout.get("resolution"),
             timeout=args.timeout,
         )
         payload = build_payload(generation_args)
