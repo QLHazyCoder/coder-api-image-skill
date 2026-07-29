@@ -52,7 +52,7 @@ For automation, `CODER_API_KEY` takes precedence over the locally stored key. Re
 
      If the user says `default`, use `gpt-image-2`; infer square as `1024x1024`, portrait as `1024x1536`, and landscape as `1536x1024`. For Gemini, infer the aspect ratio the same way and use its returned default resolution. Image edit workflows support only `gpt-image-2`.
    - `layout_selection`: this is fallback-only. Use it only when the user's consolidated answer chose a model but omitted required layout fields. Ask only for the missing size, aspect ratio, or resolution, then run `--select-layout`.
-   - `ready`: run `--generate --state <state> --output-dir <output-dir>`. Each attempt has a fixed maximum wait of 120 seconds.
+   - `ready`: run `--generate --state <state> --output-dir <output-dir>`. Each attempt waits up to 1000 seconds without an upstream response.
    - `retry_exhausted`: three attempts failed, or the error is deterministic and cannot benefit from a retry. Ask in the current chat whether the user wants another round. Only after confirmation run `--continue-retry --state <state>`, then run `--generate` again. Never continue automatically.
 
    After a complete configuration response, only ask another question when the prompt itself is genuinely ambiguous or needs revision. Do not re-ask known model, size, aspect-ratio, or resolution values.

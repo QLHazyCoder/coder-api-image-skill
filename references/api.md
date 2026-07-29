@@ -32,7 +32,7 @@ Both hardcoded Gemini models support these aspect ratios: `1:1`, `1:4`, `1:8`, `
 
 - `401` or `403`: the key is invalid, disabled, or lacks access.
 - `404`: the selected model is not available to the key's group. Select another built-in model.
-- Each request attempt waits no longer than 120 seconds.
+- Each request attempt waits no longer than 1000 seconds when the upstream has not returned a response.
 - `408`, `409`, `429`, `5xx`, network failures, malformed JSON, timeouts, and `524` are retried at most three times in one user-approved round.
 - `400`, `401`, `403`, and `404` are deterministic configuration failures and stop the round immediately.
 - A failed image download or local output-save step never submits a duplicate generation request. The state is retained and the user is asked whether to continue after an exhausted round.

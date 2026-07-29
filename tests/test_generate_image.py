@@ -404,10 +404,14 @@ class GenerateImageTest(unittest.TestCase):
         self.assertEqual(len(MockCoderAPIHandler.requests), 4)
         self.assertFalse(Path(state_path).exists())
 
-    def test_timeout_cannot_exceed_two_minutes(self) -> None:
-        result = self.run_skill("--begin", "--prompt", "a cat", "--timeout", "121")
+    def test_timeout_cannot_exceed_1000_seconds(self) -> None:
+        allowed = self.run_skill("--begin", "--prompt", "a cat", "--timeout", "1000")
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        generator.remove_workflow_state(Path(json.loads(allowed.stdout)["state"]))
+
+        result = self.run_skill("--begin", "--prompt", "a cat", "--timeout", "1001")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("between 1 and 120 seconds", result.stderr)
+        self.assertIn("between 1 and 1000 seconds", result.stderr)
 
     def test_configure_stores_chat_key_with_private_permissions_without_network_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
