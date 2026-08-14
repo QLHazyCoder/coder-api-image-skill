@@ -72,6 +72,41 @@ GEMINI_NATIVE_IMAGE_ASPECT_RATIOS = [
     "21:9",
 ]
 GEMINI_NATIVE_IMAGE_RESOLUTIONS = ["1K", "2K", "4K"]
+XAI_IMAGE_ASPECT_RATIOS = [
+    "auto",
+    "1:1",
+    "16:9",
+    "9:16",
+    "4:3",
+    "3:4",
+    "3:2",
+    "2:3",
+    "2:1",
+    "1:2",
+    "19.5:9",
+    "9:19.5",
+    "20:9",
+    "9:20",
+]
+XAI_IMAGE_RESOLUTIONS = ["1K", "2K"]
+XAI_IMAGE_CAPABILITIES = {
+    "provider": "xai",
+    "size_mode": "aspect_ratio_resolution",
+    "sizes": [],
+    "aspect_ratios": XAI_IMAGE_ASPECT_RATIOS,
+    "resolutions": XAI_IMAGE_RESOLUTIONS,
+    "qualities": [],
+    "output_formats": [],
+    "default_size": "",
+    "default_aspect_ratio": "auto",
+    "default_resolution": "1K",
+    "default_quality": "",
+    "default_output_format": "",
+    "supports_editing": False,
+    "supports_moderation": False,
+    "supports_output_compression": False,
+    "max_images": 4,
+}
 
 MODEL_CATALOG: dict[str, dict[str, Any]] = {
     "gpt-image-2": {
@@ -150,6 +185,24 @@ MODEL_CATALOG: dict[str, dict[str, Any]] = {
             "supports_output_compression": False,
             "max_images": 4,
         },
+    },
+    "grok-imagine-image-lite": {
+        "label": "Grok Imagine Image Lite",
+        "parameter": "aspect_ratio_resolution",
+        "options": XAI_IMAGE_ASPECT_RATIOS,
+        "default": "auto",
+        "resolution_options": XAI_IMAGE_RESOLUTIONS,
+        "default_resolution": "1K",
+        "capabilities": XAI_IMAGE_CAPABILITIES,
+    },
+    "grok-imagine-image-2.0": {
+        "label": "Grok Imagine Image 2.0",
+        "parameter": "aspect_ratio_resolution",
+        "options": XAI_IMAGE_ASPECT_RATIOS,
+        "default": "auto",
+        "resolution_options": XAI_IMAGE_RESOLUTIONS,
+        "default_resolution": "1K",
+        "capabilities": XAI_IMAGE_CAPABILITIES,
     },
 }
 

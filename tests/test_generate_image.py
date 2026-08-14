@@ -286,12 +286,25 @@ class GenerateImageTest(unittest.TestCase):
         catalog = generator.model_catalog_for_output()
         self.assertEqual(
             [item["model"] for item in catalog],
-            ["gpt-image-2", "gemini-3-pro-image-preview", "gemini-3.1-flash-image-preview"],
+            [
+                "gpt-image-2",
+                "gemini-3-pro-image-preview",
+                "gemini-3.1-flash-image-preview",
+                "grok-imagine-image-lite",
+                "grok-imagine-image-2.0",
+            ],
         )
-        for model in catalog[1:]:
+        for model in catalog[1:3]:
             self.assertEqual(model["parameter"], "aspect_ratio_resolution")
             self.assertEqual(model["resolution_options"], ["1K", "2K", "4K"])
             self.assertEqual(model["capabilities"]["aspect_ratios"], generator.GEMINI_NATIVE_IMAGE_ASPECT_RATIOS)
+            self.assertFalse(model["capabilities"]["supports_editing"])
+        for model in catalog[3:]:
+            self.assertEqual(model["parameter"], "aspect_ratio_resolution")
+            self.assertEqual(model["default"], "auto")
+            self.assertEqual(model["resolution_options"], ["1K", "2K"])
+            self.assertEqual(model["capabilities"]["provider"], "xai")
+            self.assertEqual(model["capabilities"]["aspect_ratios"], generator.XAI_IMAGE_ASPECT_RATIOS)
             self.assertFalse(model["capabilities"]["supports_editing"])
 
     def test_gemini_model_name_and_resolution_are_preserved(self) -> None:
@@ -333,6 +346,23 @@ class GenerateImageTest(unittest.TestCase):
         self.assertEqual(unsupported.returncode, 1)
         self.assertIn("unsupported resolution", unsupported.stderr)
         generator.remove_workflow_state(Path(state_path))
+
+    def test_grok_model_names_and_capabilities_are_preserved(self) -> None:
+        for model in ["grok-imagine-image-lite", "grok-imagine-image-2.0"]:
+            with self.subTest(model=model), tempfile.TemporaryDirectory() as directory:
+                result = self.run_workflow(
+                    "a cinematic city skyline",
+                    model,
+                    "19.5:9",
+                    directory,
+                    resolution="2K",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = MockCoderAPIHandler.requests[-1]
+                self.assertEqual(payload["model"], model)
+                self.assertEqual(payload["aspect_ratio"], "19.5:9")
+                self.assertEqual(payload["resolution"], "2K")
+                self.assertNotIn("size", payload)
 
     def test_url_response_is_downloaded(self) -> None:
         MockCoderAPIHandler.response_mode = "url"

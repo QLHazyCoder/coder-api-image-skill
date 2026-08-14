@@ -15,6 +15,8 @@ Before configuring a key, tell the user to enable model limits and whitelist onl
 | `gpt-image-2` | `size`, `quality=auto`, `output_format=png`; no separate `resolution` field |
 | `gemini-3-pro-image-preview` | `aspect_ratio`, `resolution` (`1K`, `2K`, or `4K`) |
 | `gemini-3.1-flash-image-preview` | `aspect_ratio`, `resolution` (`1K`, `2K`, or `4K`) |
+| `grok-imagine-image-lite` | `aspect_ratio`, `resolution` (`1K` or `2K`) |
+| `grok-imagine-image-2.0` | `aspect_ratio`, `resolution` (`1K` or `2K`) |
 
 All requests use `n=1` and `response_format=b64_json`. The response may still contain either `data[0].b64_json` or `data[0].url`; the script handles both and honors `data[0].mime_type` when present.
 
@@ -27,6 +29,8 @@ Do not change a selected model name. The Skill submits the exact catalog name; i
 GPT Image 2 accepts these capability-listed sizes: `auto`, `1024x1024`, `1024x1536`, `1536x1024`, `1024x1792`, `1792x1024`, `2048x2048`, `2560x1440`, `1440x2560`, `3840x2160`, and `2160x3840`. The skill adds display-only K annotations for users; it submits the raw size value.
 
 Both hardcoded Gemini models support these aspect ratios: `1:1`, `1:4`, `1:8`, `2:3`, `3:2`, `3:4`, `4:1`, `4:3`, `4:5`, `5:4`, `8:1`, `9:16`, `16:9`, and `21:9`. Their `resolution` is separately required and restricted to `1K`, `2K`, or `4K`.
+
+Both hardcoded Grok models support these aspect ratios: `auto`, `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `2:1`, `1:2`, `19.5:9`, `9:19.5`, `20:9`, and `9:20`. Their `resolution` is separately required and restricted to `1K` or `2K`; the Coder API xAI adapter normalizes it to the lowercase upstream value.
 
 ## Error Handling
 
