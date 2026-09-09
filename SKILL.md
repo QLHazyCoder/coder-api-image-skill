@@ -65,6 +65,9 @@ For automation, `CODER_API_KEY` takes precedence over the locally stored key. Re
 | Model | Ask For | Default |
 | --- | --- | --- |
 | `gpt-image-2` | pixel size | `1024x1024` |
+| `gpt-image-2.5` | pixel size | `1024x1024` |
+| `gpt-image-2.5-flare` | pixel size | `1024x1024` |
+| `gpt-image-2.5-sunburst` | pixel size | `1024x1024` |
 | `gemini-3-pro-image-preview` | aspect ratio and resolution | `1:1`, `1K` |
 | `gemini-3.1-flash-image-preview` | aspect ratio and resolution | `1:1`, `1K` |
 | `grok-imagine-image-lite` | aspect ratio and resolution | `auto`, `1K` |
@@ -74,7 +77,7 @@ The two Gemini models accept these aspect ratios: `1:1`, `1:4`, `1:8`, `2:3`, `3
 
 The two Grok models accept `auto`, `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `2:1`, `1:2`, `19.5:9`, `9:19.5`, `20:9`, or `9:20` as `aspect_ratio`, plus `1K` or `2K` as `resolution`. They do not support image editing through this skill.
 
-GPT Image 2 uses its `size` field as the actual output resolution. Present these display labels, but send only the value before the annotation: `auto`, `1024x1024 (1K)`, `1024x1536 (about 1.5K)`, `1536x1024 (about 1.5K)`, `1024x1792 (about 1.8K)`, `1792x1024 (about 1.8K)`, `2048x2048 (2K)`, `2560x1440 (about 2.5K)`, `1440x2560 (about 2.5K)`, `3840x2160 (4K)`, and `2160x3840 (4K)`. Do not send a separate `resolution` field for GPT Image 2.
+GPT Image 2 and GPT Image 2.5 variants use their `size` field as the actual output resolution. Present these display labels, but send only the value before the annotation: `auto`, `1024x1024 (1K)`, `1024x1536 (about 1.5K)`, `1536x1024 (about 1.5K)`, `1024x1792 (about 1.8K)`, `1792x1024 (about 1.8K)`, `2048x2048 (2K)`, `2560x1440 (about 2.5K)`, `1440x2560 (about 2.5K)`, `3840x2160 (4K)`, and `2160x3840 (4K)`. Do not send a separate `resolution` field for these models.
 
 ## Commands
 

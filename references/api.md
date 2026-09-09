@@ -13,6 +13,9 @@ Before configuring a key, tell the user to enable model limits and whitelist onl
 | Model | Request fields |
 | --- | --- |
 | `gpt-image-2` | `size`, `quality=auto`, `output_format=png`; no separate `resolution` field |
+| `gpt-image-2.5` | `size`, `quality=auto`, `output_format=png`; no separate `resolution` field |
+| `gpt-image-2.5-flare` | `size`, `quality=auto`, `output_format=png`; no separate `resolution` field |
+| `gpt-image-2.5-sunburst` | `size`, `quality=auto`, `output_format=png`; no separate `resolution` field |
 | `gemini-3-pro-image-preview` | `aspect_ratio`, `resolution` (`1K`, `2K`, or `4K`) |
 | `gemini-3.1-flash-image-preview` | `aspect_ratio`, `resolution` (`1K`, `2K`, or `4K`) |
 | `grok-imagine-image-lite` | `aspect_ratio`, `resolution` (`1K` or `2K`) |

@@ -144,7 +144,7 @@ class GenerateImageTest(unittest.TestCase):
         self.assertEqual(begin.returncode, 0, begin.stderr)
         state_path = json.loads(begin.stdout)["state"]
 
-        if model == "gpt-image-2":
+        if model.startswith("gpt-image-2"):
             configuration_command = [
                 "--select-configuration",
                 "--state",
@@ -288,24 +288,43 @@ class GenerateImageTest(unittest.TestCase):
             [item["model"] for item in catalog],
             [
                 "gpt-image-2",
+                "gpt-image-2.5",
+                "gpt-image-2.5-flare",
+                "gpt-image-2.5-sunburst",
                 "gemini-3-pro-image-preview",
                 "gemini-3.1-flash-image-preview",
                 "grok-imagine-image-lite",
                 "grok-imagine-image-2.0",
             ],
         )
-        for model in catalog[1:3]:
+        for model in catalog[4:6]:
             self.assertEqual(model["parameter"], "aspect_ratio_resolution")
             self.assertEqual(model["resolution_options"], ["1K", "2K", "4K"])
             self.assertEqual(model["capabilities"]["aspect_ratios"], generator.GEMINI_NATIVE_IMAGE_ASPECT_RATIOS)
             self.assertFalse(model["capabilities"]["supports_editing"])
-        for model in catalog[3:]:
+
+        for model in catalog[1:4]:
+            self.assertEqual(model["parameter"], "size")
+            self.assertEqual(model["options"], generator.GPT_IMAGE_2_SIZES)
+            self.assertEqual(model["capabilities"], generator.GPT_IMAGE_2_CAPABILITIES)
+        for model in catalog[6:]:
             self.assertEqual(model["parameter"], "aspect_ratio_resolution")
             self.assertEqual(model["default"], "auto")
             self.assertEqual(model["resolution_options"], ["1K", "2K"])
             self.assertEqual(model["capabilities"]["provider"], "xai")
             self.assertEqual(model["capabilities"]["aspect_ratios"], generator.XAI_IMAGE_ASPECT_RATIOS)
             self.assertFalse(model["capabilities"]["supports_editing"])
+
+    def test_gpt_image_25_models_use_gpt_image_2_generation_parameters(self) -> None:
+        for model in ["gpt-image-2.5", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"]:
+            with self.subTest(model=model), tempfile.TemporaryDirectory() as directory:
+                result = self.run_workflow("a glowing nebula", model, "2048x2048", directory)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = MockCoderAPIHandler.requests[-1]
+                self.assertEqual(payload["model"], model)
+                self.assertEqual(payload["size"], "2048x2048")
+                self.assertEqual(payload["quality"], "auto")
+                self.assertEqual(payload["output_format"], "png")
 
     def test_gemini_model_name_and_resolution_are_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
