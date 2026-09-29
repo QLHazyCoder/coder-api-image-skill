@@ -1,11 +1,11 @@
 ---
 name: coder-api-image
-description: Generate or edit images through Coder API at api.qlhazycoder.tech. Use this instead of generic image-generation tooling whenever a user asks to create, transform, or edit an image with Coder API, a Coder API key, a saved Coder key, an attached image, or this API endpoint. Before generating, guide local key saving and require an explicit model choice when the user did not name one.
+description: Generate or edit images and generate text-to-video or image-to-video through Coder API at api.qlhazycoder.tech. Use when a user requests image or video generation with Coder API, a Coder API key, a saved Coder key, or this API endpoint. Save a supplied key privately and require explicit image or video model selection.
 ---
 
-# Coder API Image
+# Coder API Image and Video
 
-Generate or edit one image through `https://api.qlhazycoder.tech/v1`. Use the workflow state machine below; do not call `--generate` with free-form model, size, or prompt arguments.
+Generate or edit an image, or create a video, through `https://api.qlhazycoder.tech/v1`. Use `scripts/generate_image.py` for images and `scripts/generate_video.py` for videos. Both use the same private API key, but their workflow states and model catalogs are separate. Never pass free-form model, size, or prompt arguments to a submit command.
 
 This skill cannot invoke a native Codex or Claude Code user-question UI. Ask required questions in the current chat and wait for the user's next reply.
 
@@ -19,13 +19,19 @@ After `--begin` returns `key_storage_decision`, pass the key supplied in chat di
 python3 scripts/generate_image.py --save-local-key --state <state> --api-key "<key-from-chat>"
 ```
 
+For video states, use the corresponding video command:
+
+```bash
+python3 scripts/generate_video.py --save-local-key --state <video-state> --api-key "<key-from-chat>"
+```
+
 The script stores the key outside the Skill and repository at `~/.config/coder-api-image/credentials.json` with permissions `0600`. It does not validate the key during setup.
 
 After saving a key, remind the user to enable model limits for that key and allow only the models they intend to use. Recommend an IP allowlist only when the Codex machine has a stable public egress IP; dynamic home or mobile IPs can otherwise cause avoidable authorization failures. Repeat this short reminder in the user-facing result.
 
 For automation, `CODER_API_KEY` takes precedence over the locally stored key. Remove a saved key with `python3 scripts/generate_image.py --remove-key`.
 
-## Workflow
+## Image Workflow
 
 1. Confirm that the user wants image generation or editing. This operation may incur a charge. Collect the prompt, then run:
 
@@ -97,9 +103,41 @@ python3 scripts/generate_image.py \
 
 Read `references/api.md` only when troubleshooting API payloads, errors, or output handling.
 
+## Video Workflow
+
+The Grok video plugin uses the public `POST /v1/videos`, `GET /v1/videos/{id}`, and `GET /v1/videos/{id}/content` endpoints, not the upstream xAI endpoint. Video generation can incur charges. Do not submit until the user has requested generation and chosen a model, duration, and resolution. A previous request to generate an image does not authorize creating a video.
+
+1. Start a video state with a prompt or a local reference image. For image-to-video, a PNG, JPEG, or WebP file up to 20 MiB can be passed to `--image`; omit `--prompt` only when the user wants the input image animated as-is. Do not copy the reference image to project storage.
+
+   ```bash
+   python3 scripts/generate_video.py --begin --prompt "A short shot of a paper boat on a rainy street"
+   python3 scripts/generate_video.py --begin --prompt "Animate the street scene" --image "/absolute/path/reference.png"
+   ```
+
+2. If the JSON status is `key_storage_decision`, save the key supplied in chat with the video `--save-local-key` command above. If no key was supplied, ask for one. For `model_selection`, ask a single question for all missing settings: exact model, seconds (integer 1–15), and resolution. Offer optional aspect ratio and audio generation if relevant; never assume a model when the user has not selected one. For text-to-video, omitting aspect ratio uses the plugin default `16:9`; for image-to-video, omitting it preserves the source image ratio. Use the selected model's allowed resolutions; `1080p` is accepted by the installed Grok plugin only on `grok-imagine-video-1.5`.
+
+   ```bash
+   python3 scripts/generate_video.py --list-models
+   python3 scripts/generate_video.py --select-configuration --state <video-state> --model grok-imagine-video-1.5 --seconds 5 --resolution 480p --aspect-ratio 16:9
+   ```
+
+   Use `--generate-audio` or `--no-generate-audio` only when the user explicitly specifies an audio preference. The choice is saved in the state, not sent as an invented default.
+
+3. When `ready`, call `--submit --state <video-state>` once. Save the returned state path and public task ID; submission may incur a charge. Use `--poll` to query that ID and download its MP4 when completed. Each poll call has a bounded wait (120 seconds by default); when it returns `in_progress`, call `--poll` again with the same state. Use `--max-wait 0` to check once without waiting. Specify `--output-dir` on the poll step.
+
+   ```bash
+   python3 scripts/generate_video.py --submit --state <video-state>
+   python3 scripts/generate_video.py --poll --state <video-state> --output-dir /absolute/output/directory
+   ```
+
+4. A failed status query or content download retains the task ID: retry `--poll`, never `--submit`. An uncertain or interrupted submission remains `submitting` or `submission_uncertain` and is **not** retried. Inspect the gateway task history first; if the public task ID can be recovered, run `--attach-task-id --state <video-state> --task-id <public-id>` and then `--poll`. If no ID can be recovered, tell the user the charge is uncertain and request fresh authorization before starting any new workflow. Never reuse `--submit` to recover an uncertain request.
+
+5. Report the local MP4 path, exact model, and task ID. If the result contains `security_reminder`, relay it verbatim. Do not disclose the key or upstream download URLs. This video workflow currently supports only the two Grok video models declared by the local plugin; other video adapters require their own validated parameter catalog.
+
 ## Failure Rules
 
 - Transient generation failures, including timeouts and `524`, are retried at most three times per user-approved round. This can create duplicate charges when the upstream completed an uncertain attempt; do not start another round without the user's explicit confirmation.
 - Surface `401`, `403`, `404`, `429`, and upstream error messages concisely without exposing the API key or Base64 data.
 - A model-unavailable error means the user's key group does not currently support that built-in model. Ask the user to select another listed model.
 - Do not bypass a state with a default model or inferred layout. A workflow state is deleted only after successful generation.
+- Video creation is not automatically retried, including on a timeout, `429`, or `5xx`: the upstream may have accepted the paid job. Polling and same-task content retrieval are safe to retry. The video state is deleted only after a verified MP4 has been downloaded.

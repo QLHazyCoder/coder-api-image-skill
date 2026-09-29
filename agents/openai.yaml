@@ -1,6 +1,6 @@
 interface:
-  display_name: "Coder API Image"
-  short_description: "Generate images with Coder API and saved keys"
-  default_prompt: "Use $coder-api-image to generate an image with Coder API."
+  display_name: "Coder API Image & Video"
+  short_description: "Generate images and videos with Coder API"
+  default_prompt: "Use $coder-api-image to generate an image or video with Coder API."
 policy:
   allow_implicit_invocation: true

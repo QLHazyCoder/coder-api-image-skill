@@ -1,4 +1,4 @@
-# Coder API Image Contract
+# Coder API Image and Video Contract
 
 The script posts text-to-image JSON requests to `POST /v1/images/generations` and GPT Image 2 edit multipart requests to `POST /v1/images/edits`, using an API key from `CODER_API_KEY` or the local private config created by `--configure`.
 
@@ -43,3 +43,11 @@ Both hardcoded Grok models support these aspect ratios: `auto`, `1:1`, `16:9`, `
 - `408`, `409`, `429`, `5xx`, network failures, malformed JSON, timeouts, and `524` are retried at most three times in one user-approved round.
 - `400`, `401`, `403`, and `404` are deterministic configuration failures and stop the round immediately.
 - A failed image download or local output-save step never submits a duplicate generation request. The state is retained and the user is asked whether to continue after an exhausted round.
+
+## Grok Video Contract
+
+The separate `scripts/generate_video.py` command shares the private credential config and API base URL with the image workflow, but uses its own private workflow state. It submits once to `POST /v1/videos` (JSON for text-to-video, multipart with one `image` for image-to-video), checks `GET /v1/videos/{id}`, then downloads authorized `GET /v1/videos/{id}/content` as a local MP4. It does **not** call xAI's upstream `/v1/videos/generations` directly. Both `CODER_API_BASE_URL` and the API token must address the New API instance where the Grok video plugin is installed and the selected models are enabled.
+
+Required submission fields are exact `model`, `seconds` (integer 1–15), and `resolution` (`480p` or `720p` for `grok-imagine-video`; additionally `1080p` for `grok-imagine-video-1.5`). An optional `prompt`, `aspect_ratio` (one of `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`), and explicit `generate_audio` boolean are supported. `prompt` is required for text-to-video, optional with a local image. Image-to-video sends at most one PNG/JPEG/WebP reference of 20 MiB and omits `aspect_ratio` when the source ratio should be retained. Other video plugins may use different parameters; the catalog here is specific to the locally inspected `xai-grok-video` plugin.
+
+Creation must return a public task `id`. The script persists a `submitting` state before sending the request and the public `id` immediately after receiving a valid response. A network timeout, `429`, `5xx`, redirect, invalid response, or interruption can mean the upstream accepted and billed the request; the state must **not** be resubmitted. `--attach-task-id` can bind a public ID recovered from gateway task history to an uncertain state. `GET` and content downloads can be resumed on the same task; no response URL is followed, and the Bearer token is sent only to the configured API host. Downloads are capped at 512 MiB, checked for an MP4 header, and never overwrite an existing file. Local download failures leave the task state intact for a later `--poll`.
