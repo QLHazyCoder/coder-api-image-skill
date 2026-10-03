@@ -1,6 +1,6 @@
 ---
 name: coder-api-image
-description: Generate or edit images and generate text-to-video or image-to-video through Coder API at api.qlhazycoder.tech. Use when a user requests image or video generation with Coder API, a Coder API key, a saved Coder key, or this API endpoint. Save a supplied key privately and require explicit image or video model selection.
+description: Generate or edit images and generate text-to-video or image-to-video through Coder API at api.qlhazycoder.tech. Use when a user requests image or video generation with Coder API, a Coder API key, a saved Coder key, or this API endpoint, including Grok and the four ZeeQi Seedance models. Save a supplied key privately, require explicit model selection, and require a public image URL for ZeeQi image-to-video.
 ---
 
 # Coder API Image and Video
@@ -105,23 +105,40 @@ Read `references/api.md` only when troubleshooting API payloads, errors, or outp
 
 ## Video Workflow
 
-The Grok video plugin uses the public `POST /v1/videos`, `GET /v1/videos/{id}`, and `GET /v1/videos/{id}/content` endpoints, not the upstream xAI endpoint. Video generation can incur charges. Do not submit until the user has requested generation and chosen a model, duration, and resolution. A previous request to generate an image does not authorize creating a video.
+The video client uses the public `POST /v1/videos`, `GET /v1/videos/{id}`, and `GET /v1/videos/{id}/content` endpoints. It does not call an upstream vendor endpoint directly. Video generation can incur charges. Do not submit until the user has requested generation and chosen an exact model, duration, and resolution. A previous request to generate an image does not authorize creating a video.
 
-1. Start a video state with a prompt or a local reference image. For image-to-video, a PNG, JPEG, or WebP file up to 20 MiB can be passed to `--image`; omit `--prompt` only when the user wants the input image animated as-is. Do not copy the reference image to project storage.
+The current explicit video catalog is:
+
+| Model | Resolution | Duration accepted by the installed plugin | Image-to-video input |
+| --- | --- | --- | --- |
+| `grok-imagine-video` | `480p`, `720p` | 1–15 seconds | local PNG/JPEG/WebP or public URL |
+| `grok-imagine-video-1.5` | `480p`, `720p`, `1080p` | 1–15 seconds | local PNG/JPEG/WebP or public URL |
+| `seedance-2.0` | `480p`, `720p` | 1–3600 seconds | public HTTP(S) URL only |
+| `seedance-2.0-fast` | `480p`, `720p` | 1–3600 seconds | public HTTP(S) URL only |
+| `seedance-2.0-mini` | `480p`, `720p` | 1–3600 seconds | public HTTP(S) URL only |
+| `seedance-2.5` | `480p`, `720p`, `1080p` | 1–3600 seconds | public HTTP(S) URL only |
+
+The four `seedance` names above are the only ZeeQi models implemented in this skill. Do not invent aliases or add removed models such as `H3`, `wan3.0-video`, or `seedance-2.5-once`.
+
+1. Start a video state with a prompt, a local reference image, or a public reference image URL:
 
    ```bash
    python3 scripts/generate_video.py --begin --prompt "A short shot of a paper boat on a rainy street"
    python3 scripts/generate_video.py --begin --prompt "Animate the street scene" --image "/absolute/path/reference.png"
+   python3 scripts/generate_video.py --begin --prompt "Animate the product photo" --image-url "https://images.example/product.png"
    ```
 
-2. If the JSON status is `key_storage_decision`, save the key supplied in chat with the video `--save-local-key` command above. If no key was supplied, ask for one. For `model_selection`, ask a single question for all missing settings: exact model, seconds (integer 1–15), and resolution. Offer optional aspect ratio and audio generation if relevant; never assume a model when the user has not selected one. For text-to-video, omitting aspect ratio uses the plugin default `16:9`; for image-to-video, omitting it preserves the source image ratio. Use the selected model's allowed resolutions; `1080p` is accepted by the installed Grok plugin only on `grok-imagine-video-1.5`.
+   `--image` is for the Grok multipart adapter. The ZeeQi adapter accepts JSON only and requires `--image-url`; it cannot upload a local file and the URL must be reachable by the provider. Do not copy a local reference image to project storage or pretend a local filesystem path is a public URL. The installed ZeeQi protocol also requires a non-empty prompt even when a reference URL is supplied.
+
+2. If the JSON status is `key_storage_decision`, save the key supplied in chat with the video `--save-local-key` command above. If no key was supplied, ask for one. For `model_selection`, ask a single question for all missing settings: exact model, seconds, and resolution. Use the selected model's duration range and resolution list from the catalog; never assume a model or silently downgrade a resolution. For the two Grok models, the request field is `seconds`; for the four ZeeQi models, the client converts the same CLI value to the upstream-compatible `duration` field. Offer optional aspect ratio and audio generation only when relevant and only preserve an explicitly chosen audio preference.
 
    ```bash
    python3 scripts/generate_video.py --list-models
    python3 scripts/generate_video.py --select-configuration --state <video-state> --model grok-imagine-video-1.5 --seconds 5 --resolution 480p --aspect-ratio 16:9
+   python3 scripts/generate_video.py --select-configuration --state <video-state> --model seedance-2.5 --seconds 8 --resolution 1080p --aspect-ratio 16:9
    ```
 
-   Use `--generate-audio` or `--no-generate-audio` only when the user explicitly specifies an audio preference. The choice is saved in the state, not sent as an invented default.
+   Grok validates its known aspect-ratio list. ZeeQi passes a non-empty aspect-ratio string through its JSON contract; do not apply Grok-only resolution or image-upload assumptions to a ZeeQi model.
 
 3. When `ready`, call `--submit --state <video-state>` once. Save the returned state path and public task ID; submission may incur a charge. Use `--poll` to query that ID and download its MP4 when completed. Each poll call has a bounded wait (120 seconds by default); when it returns `in_progress`, call `--poll` again with the same state. Use `--max-wait 0` to check once without waiting. Specify `--output-dir` on the poll step.
 
@@ -132,7 +149,7 @@ The Grok video plugin uses the public `POST /v1/videos`, `GET /v1/videos/{id}`, 
 
 4. A failed status query or content download retains the task ID: retry `--poll`, never `--submit`. An uncertain or interrupted submission remains `submitting` or `submission_uncertain` and is **not** retried. Inspect the gateway task history first; if the public task ID can be recovered, run `--attach-task-id --state <video-state> --task-id <public-id>` and then `--poll`. If no ID can be recovered, tell the user the charge is uncertain and request fresh authorization before starting any new workflow. Never reuse `--submit` to recover an uncertain request.
 
-5. Report the local MP4 path, exact model, and task ID. If the result contains `security_reminder`, relay it verbatim. Do not disclose the key or upstream download URLs. This video workflow currently supports only the two Grok video models declared by the local plugin; other video adapters require their own validated parameter catalog.
+5. Report the local MP4 path, exact model, and task ID. If the result contains `security_reminder`, relay it verbatim. Do not disclose the key or upstream download URLs. Other video adapters require their own validated model and parameter catalog before being added here.
 
 ## Failure Rules
 

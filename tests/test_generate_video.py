@@ -141,6 +141,11 @@ class GenerateVideoTest(unittest.TestCase):
         catalog = self.run_skill("--list-models")
         self.assertEqual(catalog.returncode, 0)
         self.assertEqual(json.loads(catalog.stdout)["models"]["grok-imagine-video"], ["480p", "720p"])
+        self.assertEqual(json.loads(catalog.stdout)["models"]["seedance-2.0"], ["480p", "720p"])
+        self.assertEqual(json.loads(catalog.stdout)["models"]["seedance-2.0-fast"], ["480p", "720p"])
+        self.assertEqual(json.loads(catalog.stdout)["models"]["seedance-2.0-mini"], ["480p", "720p"])
+        self.assertEqual(json.loads(catalog.stdout)["models"]["seedance-2.5"], ["480p", "720p", "1080p"])
+        self.assertEqual(json.loads(catalog.stdout)["model_profiles"]["seedance-2.5"]["image_input"], "public_url")
         begun = self.run_skill("--begin", "--prompt", "light in a bottle")
         state = json.loads(begun.stdout)
         self.assertEqual(state["status"], "model_selection")
@@ -150,6 +155,58 @@ class GenerateVideoTest(unittest.TestCase):
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("unsupported resolution", rejected.stderr)
         video.remove_state(Path(state["state"]))
+
+    def test_zhiqi_models_use_duration_and_public_image_url(self) -> None:
+        image_url = "https://images.example/reference.png"
+        begun = self.run_skill("--begin", "--prompt", "Animate the reference image", "--image-url", image_url)
+        self.assertEqual(begun.returncode, 0, begun.stderr)
+        state_path = json.loads(begun.stdout)["state"]
+        configured = self.run_skill(
+            "--select-configuration", "--state", state_path, "--model", "seedance-2.5",
+            "--seconds", "8", "--resolution", "1080p", "--aspect-ratio", "16:9", "--generate-audio",
+        )
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+        submitted = self.run_skill("--submit", "--state", state_path)
+        self.assertEqual(submitted.returncode, 0, submitted.stderr)
+        self.assertEqual(MockVideoAPI.submitted[0], {
+            "model": "seedance-2.5",
+            "duration": 8,
+            "resolution": "1080p",
+            "input_reference": image_url,
+            "prompt": "Animate the reference image",
+            "aspect_ratio": "16:9",
+            "generate_audio": True,
+        })
+        video.remove_state(Path(state_path))
+
+    def test_zhiqi_resolution_and_local_image_rules_are_model_specific(self) -> None:
+        begun = self.run_skill("--begin", "--prompt", "sunrise")
+        state_path = json.loads(begun.stdout)["state"]
+        rejected = self.run_skill(
+            "--select-configuration", "--state", state_path, "--model", "seedance-2.0",
+            "--seconds", "5", "--resolution", "1080p",
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("unsupported resolution", rejected.stderr)
+        video.remove_state(Path(state_path))
+
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "input.png"
+            image.write_bytes(PNG_BYTES)
+            begun = self.run_skill("--begin", "--prompt", "animate this", "--image", str(image))
+            state_path = json.loads(begun.stdout)["state"]
+            rejected = self.run_skill(
+                "--select-configuration", "--state", state_path, "--model", "seedance-2.5",
+                "--seconds", "5", "--resolution", "720p",
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("requires --image-url", rejected.stderr)
+            video.remove_state(Path(state_path))
+
+    def test_public_image_url_is_validated_before_workflow_creation(self) -> None:
+        result = self.run_skill("--begin", "--prompt", "animate", "--image-url", "file:///tmp/image.png")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("public HTTP(S) URL", result.stderr)
 
     def test_create_poll_and_download_without_repeat_post(self) -> None:
         path = self.ready(resolution="1080p", aspect_ratio="9:16")
