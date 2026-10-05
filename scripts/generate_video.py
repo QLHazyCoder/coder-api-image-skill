@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import getpass
 import json
 import os
 import re
 import secrets
+import stat
 import sys
 import tempfile
 import time
@@ -58,25 +60,25 @@ VIDEO_MODEL_CONFIG = {
     "seedance-2.0": {
         "adapter": "zhiqi",
         "duration": {"min": 1, "max": 3600},
-        "image_input": "public_url",
+        "image_input": "local_or_public_url_via_coder_api_image_library",
         "aspect_ratios": None,
     },
     "seedance-2.0-fast": {
         "adapter": "zhiqi",
         "duration": {"min": 1, "max": 3600},
-        "image_input": "public_url",
+        "image_input": "local_or_public_url_via_coder_api_image_library",
         "aspect_ratios": None,
     },
     "seedance-2.0-mini": {
         "adapter": "zhiqi",
         "duration": {"min": 1, "max": 3600},
-        "image_input": "public_url",
+        "image_input": "local_or_public_url_via_coder_api_image_library",
         "aspect_ratios": None,
     },
     "seedance-2.5": {
         "adapter": "zhiqi",
         "duration": {"min": 1, "max": 3600},
-        "image_input": "public_url",
+        "image_input": "local_or_public_url_via_coder_api_image_library",
         "aspect_ratios": None,
     },
 }
@@ -85,8 +87,12 @@ VIDEO_STATE_VERSION = 1
 MAX_REFERENCE_BYTES = 20 * 1024 * 1024
 MAX_VIDEO_BYTES = 512 * 1024 * 1024
 MAX_JSON_BYTES = 1024 * 1024
+MAX_UPLOAD_RESPONSE_BYTES = 256 * 1024
 MAX_TIMEOUT = 1000
 TASK_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,255}\Z")
+IMAGE_UPLOAD_ENDPOINT = "https://coderapi.vip/image-upload/upload"
+IMAGE_UPLOAD_KEY_FIELD = "new_api_image_upload_key"
+IMAGE_UPLOAD_URL_PATTERN = re.compile(r"^/image-upload/(m_[0-7][0-9A-HJKMNP-TV-Z]{25})$")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -100,6 +106,8 @@ def parse_args() -> argparse.Namespace:
     operations.add_argument("--list-models", action="store_true")
     operations.add_argument("--begin", action="store_true")
     operations.add_argument("--save-local-key", action="store_true")
+    operations.add_argument("--save-image-upload-key", action="store_true")
+    operations.add_argument("--remove-image-upload-key", action="store_true")
     operations.add_argument("--select-configuration", action="store_true")
     operations.add_argument("--submit", action="store_true")
     operations.add_argument("--attach-task-id", action="store_true")
@@ -137,9 +145,163 @@ def validate_reference(path: str) -> Path:
 def validate_public_image_url(value: str) -> str:
     url = (value or "").strip()
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or any(char.isspace() for char in url):
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or any(char.isspace() for char in url)
+    ):
         raise SkillError("--image-url must be a public HTTP(S) URL")
     return url
+
+
+def read_image_upload_key(config_path: Path | None = None) -> str:
+    path = config_path or local_config_path()
+    try:
+        file_info = path.lstat()
+        if not stat.S_ISREG(file_info.st_mode) or stat.S_IMODE(file_info.st_mode) & 0o077:
+            raise SkillError("local credential config must be a regular file with permissions 0600")
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise SkillError("local ZeeQi image upload requires a New API key; configure it with --save-image-upload-key") from error
+    except (OSError, json.JSONDecodeError) as error:
+        raise SkillError(f"local credential config is invalid; run --save-image-upload-key ({error})") from error
+    key = config.get(IMAGE_UPLOAD_KEY_FIELD) if isinstance(config, dict) else None
+    if not isinstance(key, str) or not key.strip().startswith("sk-"):
+        raise SkillError("local ZeeQi image upload requires a New API key; configure it with --save-image-upload-key")
+    return key.strip()
+
+
+def save_image_upload_key(config_path: Path, api_key: str) -> None:
+    api_key = api_key.strip()
+    if not api_key.startswith("sk-") or any(char.isspace() for char in api_key):
+        raise SkillError("New API image upload key must be a non-empty sk- key")
+    config: dict[str, Any] = {}
+    try:
+        file_info = config_path.lstat()
+        if not stat.S_ISREG(file_info.st_mode):
+            raise SkillError("local credential config must be a regular file")
+        existing = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        existing = {}
+    except (OSError, json.JSONDecodeError) as error:
+        raise SkillError(f"local credential config is invalid: {error}") from error
+    if not isinstance(existing, dict):
+        raise SkillError("local credential config must be a JSON object")
+    config.update(existing)
+    config[IMAGE_UPLOAD_KEY_FIELD] = api_key
+    config_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(config_path.parent, 0o700)
+    write_private_json(config_path, config)
+
+
+def remove_image_upload_key(config_path: Path) -> None:
+    try:
+        file_info = config_path.lstat()
+        if not stat.S_ISREG(file_info.st_mode):
+            raise SkillError("local credential config must be a regular file")
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, json.JSONDecodeError) as error:
+        raise SkillError(f"local credential config is invalid: {error}") from error
+    if not isinstance(config, dict):
+        raise SkillError("local credential config must be a JSON object")
+    config.pop(IMAGE_UPLOAD_KEY_FIELD, None)
+    if config:
+        write_private_json(config_path, config)
+    else:
+        config_path.unlink(missing_ok=True)
+
+
+def upload_multipart_payload(image_path: Path, field: str) -> tuple[bytes, str]:
+    image = validate_reference(str(image_path))
+    image_bytes = image.read_bytes()
+    if len(image_bytes) > MAX_REFERENCE_BYTES:
+        raise SkillError("video reference image must be at most 20 MiB")
+    mime = inferred_mime_type(image_bytes[:12], "")
+    extension = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(mime)
+    if not extension:
+        raise SkillError("video reference image must be PNG, JPEG, or WebP")
+    boundary = f"----CoderAPIImageUpload{secrets.token_hex(16)}"
+    body = bytearray()
+    body.extend(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; filename="reference.{extension}"\r\n'
+        f"Content-Type: {mime}\r\n\r\n".encode("ascii")
+    )
+    body.extend(image_bytes)
+    body.extend(f"\r\n--{boundary}--\r\n".encode("ascii"))
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
+def extract_uploaded_image_url(value: Any, depth: int = 0) -> str | None:
+    if depth > 3:
+        return None
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate.startswith(("http://", "https://")):
+            return candidate
+        return None
+    if isinstance(value, list):
+        for item in value:
+            found = extract_uploaded_image_url(item, depth + 1)
+            if found:
+                return found
+        return None
+    if not isinstance(value, dict):
+        return None
+    for key in ("url", "public_url", "image_url", "download_url"):
+        found = extract_uploaded_image_url(value.get(key), depth + 1)
+        if found:
+            return found
+    for key in ("data", "result", "image", "images", "links"):
+        found = extract_uploaded_image_url(value.get(key), depth + 1)
+        if found:
+            return found
+    return None
+
+
+def upload_reference_image(image_path: Path, timeout: int) -> str:
+    api_key = read_image_upload_key()
+    body, content_type = upload_multipart_payload(image_path, "file")
+    headers = {
+        "Accept": "application/json, text/plain",
+        "Content-Type": content_type,
+        "Content-Length": str(len(body)),
+        "Authorization": f"Bearer {api_key}",
+    }
+    request = urllib.request.Request(IMAGE_UPLOAD_ENDPOINT, data=body, method="POST", headers=headers)
+    try:
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
+            response_body = response.read(MAX_UPLOAD_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as error:
+        details = api_error_message(error.read(8192))
+        details = details.replace(api_key, "[redacted]")
+        raise SkillError(f"image upload returned HTTP {error.code}: {details}") from error
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        message = str(error).replace(api_key, "[redacted]")
+        raise SkillError(f"image upload request failed: {message}") from error
+    if len(response_body) > MAX_UPLOAD_RESPONSE_BYTES:
+        raise SkillError("image upload response exceeds the 256 KiB safety limit")
+    try:
+        decoded: Any = json.loads(response_body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        decoded = response_body.decode("utf-8", errors="replace").strip()
+    image_url = extract_uploaded_image_url(decoded)
+    if not image_url:
+        raise SkillError("image upload response did not contain a public image URL")
+    parsed = urllib.parse.urlsplit(image_url)
+    match = IMAGE_UPLOAD_URL_PATTERN.fullmatch(parsed.path)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "coderapi.vip"
+        or not match
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise SkillError("image upload response must contain a coderapi.vip image URL with a valid media ID")
+    return f"https://coderapi.vip/image-upload/{match.group(1)}"
 
 
 def read_state(path: Path) -> dict[str, Any]:
@@ -222,8 +384,6 @@ def select_configuration(state: dict[str, Any], args: argparse.Namespace) -> Non
         raise SkillError(f"unsupported resolution for {args.model}; choose {', '.join(VIDEO_MODELS[args.model])}")
     if profile["adapter"] == "grok" and args.aspect_ratio and args.aspect_ratio not in ASPECT_RATIOS:
         raise SkillError(f"unsupported aspect ratio; choose {', '.join(ASPECT_RATIOS)}")
-    if profile["adapter"] == "zhiqi" and state.get("image_path"):
-        raise SkillError(f"{args.model} requires --image-url for image-to-video; it does not accept a local image upload")
     if profile["adapter"] == "zhiqi" and not state.get("prompt", "").strip():
         raise SkillError(f"{args.model} requires a non-empty --prompt, including image-to-video")
     settings: dict[str, Any] = {"seconds": args.seconds, "resolution": args.resolution}
@@ -234,7 +394,7 @@ def select_configuration(state: dict[str, Any], args: argparse.Namespace) -> Non
     state.update({"model": args.model, "settings": settings, "status": "ready"})
 
 
-def request_payload(state: dict[str, Any]) -> dict[str, Any]:
+def request_payload(state: dict[str, Any], resolved_image_url: str | None = None) -> dict[str, Any]:
     model, settings = state.get("model"), state.get("settings")
     if model not in VIDEO_MODELS or not isinstance(settings, dict) or model not in VIDEO_MODEL_CONFIG:
         raise SkillError("video workflow configuration is invalid")
@@ -243,8 +403,8 @@ def request_payload(state: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(seconds, int) or isinstance(seconds, bool) or not duration["min"] <= seconds <= duration["max"] or resolution not in VIDEO_MODELS[model]:
         raise SkillError("video workflow configuration is invalid")
     adapter = VIDEO_MODEL_CONFIG[model]["adapter"]
-    if adapter == "zhiqi" and state.get("image_path"):
-        raise SkillError(f"{model} requires a public image URL; local image uploads are not supported")
+    if adapter == "zhiqi" and state.get("image_path") and not state.get("image_url") and not resolved_image_url:
+        raise SkillError(f"{model} requires uploading the local reference image before submission")
     payload = {"model": model, "resolution": resolution}
     if adapter == "grok":
         payload["seconds"] = seconds
@@ -256,6 +416,10 @@ def request_payload(state: dict[str, Any]) -> dict[str, Any]:
             raise SkillError(f"{model} requires a non-empty prompt")
         if state.get("image_url"):
             payload["input_reference"] = validate_public_image_url(state["image_url"])
+        elif resolved_image_url:
+            payload["input_reference"] = validate_public_image_url(resolved_image_url)
+        elif state.get("image_path"):
+            raise SkillError("local reference image must be uploaded before the ZeeQi request")
     if state["prompt"]:
         payload["prompt"] = state["prompt"]
     ratio = settings.get("aspect_ratio")
@@ -331,13 +495,22 @@ def state_url(state: dict[str, Any]) -> str:
 def submit(path: Path, state: dict[str, Any], timeout: int) -> dict[str, Any]:
     if state["status"] != "ready":
         raise SkillError(f"video workflow is not ready to submit; current status is {state['status']}")
-    payload = request_payload(state)
-    if state.get("image_path"):
+    profile = VIDEO_MODEL_CONFIG.get(state.get("model"))
+    base_url = api_base_url()
+    api_key = read_api_key()
+    resolved_image_url = state.get("uploaded_image_url")
+    if profile and profile["adapter"] == "zhiqi" and state.get("image_path") and not state.get("image_url"):
+        if resolved_image_url:
+            resolved_image_url = validate_public_image_url(resolved_image_url)
+        else:
+            resolved_image_url = upload_reference_image(Path(state["image_path"]), timeout)
+            state["uploaded_image_url"] = resolved_image_url
+            write_private_json(path, state)
+    payload = request_payload(state, resolved_image_url)
+    if state.get("image_path") and profile and profile["adapter"] == "grok":
         body, content_type = multipart_payload(payload, Path(state["image_path"]))
     else:
         body, content_type = json.dumps(payload).encode("utf-8"), "application/json"
-    base_url = api_base_url()
-    api_key = read_api_key()
     state.update({"status": "submitting", "base_url": base_url})
     write_private_json(path, state)
     try:
@@ -472,8 +645,15 @@ def main() -> int:
             raise SkillError("--task-id is accepted only with --attach-task-id")
         if not args.save_local_key and args.api_key is not None:
             raise SkillError("--api-key is accepted only with --save-local-key")
-        if args.list_models:
-            result: dict[str, Any] = {
+        if args.save_image_upload_key:
+            api_key = getpass.getpass("New API image upload key: ")
+            save_image_upload_key(local_config_path(), api_key)
+            result: dict[str, Any] = {"image_upload_key_saved": True, "config": str(local_config_path())}
+        elif args.remove_image_upload_key:
+            remove_image_upload_key(local_config_path())
+            result = {"image_upload_key_saved": False, "config": str(local_config_path())}
+        elif args.list_models:
+            result = {
                 "media": "video",
                 "models": VIDEO_MODELS,
                 "model_profiles": VIDEO_MODEL_CONFIG,

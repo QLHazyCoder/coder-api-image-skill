@@ -465,9 +465,14 @@ class GenerateImageTest(unittest.TestCase):
     def test_configure_stores_chat_key_with_private_permissions_without_network_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "private" / "credentials.json"
+            config_path.parent.mkdir()
+            config_path.write_text(json.dumps({"new_api_image_upload_key": "sk-image-key"}), encoding="utf-8")
             generator.configure_api_key(config_path, "configured-test-key", emit_reminder=False)
             self.assertEqual(generator.read_local_api_key(config_path), "configured-test-key")
             self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
+            self.assertEqual(json.loads(config_path.read_text(encoding="utf-8"))["new_api_image_upload_key"], "sk-image-key")
+            generator.remove_local_api_key(config_path)
+            self.assertEqual(json.loads(config_path.read_text(encoding="utf-8")), {"new_api_image_upload_key": "sk-image-key"})
 
     def test_workflow_saves_chat_key_without_interactive_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

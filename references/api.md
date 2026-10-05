@@ -46,7 +46,7 @@ Both hardcoded Grok models support these aspect ratios: `auto`, `1:1`, `16:9`, `
 
 ## Video Contracts
 
-The separate `scripts/generate_video.py` command shares the private credential config and API base URL with the image workflow, but uses its own private workflow state. It submits once to the New API's standard `POST /v1/videos`, checks `GET /v1/videos/{id}`, then downloads authorized `GET /v1/videos/{id}/content` as a local MP4. It does **not** call a vendor upstream endpoint directly. `CODER_API_BASE_URL` and the API token must address the New API instance where the selected video plugins are installed and the selected models are enabled.
+The separate `scripts/generate_video.py` command shares the private credential config and API base URL with the image workflow, but uses its own private workflow state. It submits once to the New API's standard `POST /v1/videos`, checks `GET /v1/videos/{id}`, then downloads authorized `GET /v1/videos/{id}/content` as a local MP4. It does **not** call a vendor upstream endpoint directly. `CODER_API_BASE_URL` and the Coder API token must address the New API instance where the selected video plugins are installed and the selected models are enabled.
 
 ### Grok adapter
 
@@ -54,7 +54,11 @@ The Grok models send JSON for text-to-video and multipart with one local `image`
 
 ### ZeeQi Seedance adapter
 
-The four supported ZeeQi models are `seedance-2.0`, `seedance-2.0-fast`, `seedance-2.0-mini`, and `seedance-2.5`. They use JSON only. The client accepts the CLI's `--seconds` setting and sends it as `duration` (the installed plugin validates an integer from 1 through 3600). Resolutions are `480p` and `720p` for the first three models; `seedance-2.5` additionally accepts `1080p`. The plugin accepts a non-empty `prompt`, `resolution`, optional `aspect_ratio`, optional `generate_audio`, and a public image reference through `input_reference`. A prompt is required even for image-to-video. The reference must be an externally reachable HTTP(S) URL; a local path or multipart upload is rejected before submission.
+The four supported ZeeQi models are `seedance-2.0`, `seedance-2.0-fast`, `seedance-2.0-mini`, and `seedance-2.5`. They use JSON only. The client accepts the CLI's `--seconds` setting and sends it as `duration` (the installed plugin validates an integer from 1 through 3600). Resolutions are `480p` and `720p` for the first three models; `seedance-2.5` additionally accepts `1080p`. The plugin accepts a non-empty `prompt`, `resolution`, optional `aspect_ratio`, optional `generate_audio`, and a public image reference through `input_reference`. A prompt is required even for image-to-video. The final reference must be an externally reachable HTTP(S) URL; a local path is uploaded first when the image-host adapter is configured.
+
+When the user supplies a local `--image`, configure their own New API key with `python3 scripts/generate_video.py --save-image-upload-key`. This prompts without echo and stores the key as `new_api_image_upload_key` in `~/.config/coder-api-image/credentials.json`, preserving the separate Coder API key. The skill uploads the validated PNG/JPEG/WebP to the fixed `https://coderapi.vip/image-upload/upload` endpoint, using the `file` multipart field and `Authorization: Bearer <New API key>`. Redirects are disabled, and the response URL is accepted only when it has the exact `https://coderapi.vip/image-upload/` origin/path and a valid media ULID. The New API key is never sent to Coder API or ZeeQi. Missing credentials, upload errors, or a non-canonical URL stop before the billable video request. Public `--image-url` inputs bypass the upload step and continue to be validated as public HTTP(S) URLs.
+
+Use `python3 scripts/generate_video.py --remove-image-upload-key` to remove only the New API image-upload key; the existing Coder API key remains configured.
 
 The ZeeQi plugin may accept additional provider fields internally, but this skill deliberately sends only the stable standard fields above. Do not add a model or parameter until its plugin contract, model-specific limits, billing facts, and mock tests are updated together.
 

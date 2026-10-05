@@ -25,7 +25,7 @@ For video states, use the corresponding video command:
 python3 scripts/generate_video.py --save-local-key --state <video-state> --api-key "<key-from-chat>"
 ```
 
-The script stores the key outside the Skill and repository at `~/.config/coder-api-image/credentials.json` with permissions `0600`. It does not validate the key during setup.
+The script stores the Coder API key outside the Skill and repository at `~/.config/coder-api-image/credentials.json` with permissions `0600`. For local ZeeQi image uploads, `scripts/generate_video.py --save-image-upload-key` securely prompts for the user's own `sk-` New API key and stores it in the separate `new_api_image_upload_key` field in that same private file. The two keys are never interchangeable.
 
 After saving a key, remind the user to enable model limits for that key and allow only the models they intend to use. Recommend an IP allowlist only when the Codex machine has a stable public egress IP; dynamic home or mobile IPs can otherwise cause avoidable authorization failures. Repeat this short reminder in the user-facing result.
 
@@ -107,16 +107,24 @@ Read `references/api.md` only when troubleshooting API payloads, errors, or outp
 
 The video client uses the public `POST /v1/videos`, `GET /v1/videos/{id}`, and `GET /v1/videos/{id}/content` endpoints. It does not call an upstream vendor endpoint directly. Video generation can incur charges. Do not submit until the user has requested generation and chosen an exact model, duration, and resolution. A previous request to generate an image does not authorize creating a video.
 
+For ZeeQi local image-to-video, configure the New API image-upload key before submitting:
+
+```bash
+python3 scripts/generate_video.py --save-image-upload-key
+```
+
+The key is read only from the private local config and sent as `Authorization: Bearer` to the fixed `https://coderapi.vip/image-upload/upload` endpoint. The request always uses one multipart `file`; there is no configurable image host, upload token, or upload URL. The response must contain a valid `https://coderapi.vip/image-upload/m_<ULID>` URL. Redirects and URLs from other hosts are rejected. Upload or validation failure stops before the billable video request. `--remove-image-upload-key` removes only this credential and preserves the Coder API key.
+
 The current explicit video catalog is:
 
 | Model | Resolution | Duration accepted by the installed plugin | Image-to-video input |
 | --- | --- | --- | --- |
 | `grok-imagine-video` | `480p`, `720p` | 1–15 seconds | local PNG/JPEG/WebP or public URL |
 | `grok-imagine-video-1.5` | `480p`, `720p`, `1080p` | 1–15 seconds | local PNG/JPEG/WebP or public URL |
-| `seedance-2.0` | `480p`, `720p` | 1–3600 seconds | public HTTP(S) URL only |
-| `seedance-2.0-fast` | `480p`, `720p` | 1–3600 seconds | public HTTP(S) URL only |
-| `seedance-2.0-mini` | `480p`, `720p` | 1–3600 seconds | public HTTP(S) URL only |
-| `seedance-2.5` | `480p`, `720p`, `1080p` | 1–3600 seconds | public HTTP(S) URL only |
+| `seedance-2.0` | `480p`, `720p` | 1–3600 seconds | public URL or local image uploaded to the Coder API image library |
+| `seedance-2.0-fast` | `480p`, `720p` | 1–3600 seconds | public URL or local image uploaded to the Coder API image library |
+| `seedance-2.0-mini` | `480p`, `720p` | 1–3600 seconds | public URL or local image uploaded to the Coder API image library |
+| `seedance-2.5` | `480p`, `720p`, `1080p` | 1–3600 seconds | public URL or local image uploaded to the Coder API image library |
 
 The four `seedance` names above are the only ZeeQi models implemented in this skill. Do not invent aliases or add removed models such as `H3`, `wan3.0-video`, or `seedance-2.5-once`.
 
@@ -128,7 +136,7 @@ The four `seedance` names above are the only ZeeQi models implemented in this sk
    python3 scripts/generate_video.py --begin --prompt "Animate the product photo" --image-url "https://images.example/product.png"
    ```
 
-   `--image` is for the Grok multipart adapter. The ZeeQi adapter accepts JSON only and requires `--image-url`; it cannot upload a local file and the URL must be reachable by the provider. Do not copy a local reference image to project storage or pretend a local filesystem path is a public URL. The installed ZeeQi protocol also requires a non-empty prompt even when a reference URL is supplied.
+`--image` is sent directly as multipart for Grok. For ZeeQi, a local `--image` is uploaded to the fixed image host first; the returned public URL is then sent as JSON `input_reference`. Alternatively, `--image-url` skips that upload and is sent directly; the two CLI options are mutually exclusive. Do not copy a local reference image to project storage or pretend a local filesystem path is a public URL. The installed ZeeQi protocol also requires a non-empty prompt even when a reference URL is supplied. If the New API image-upload key is not configured, submission stops before the billable video request.
 
 2. If the JSON status is `key_storage_decision`, save the key supplied in chat with the video `--save-local-key` command above. If no key was supplied, ask for one. For `model_selection`, ask a single question for all missing settings: exact model, seconds, and resolution. Use the selected model's duration range and resolution list from the catalog; never assume a model or silently downgrade a resolution. For the two Grok models, the request field is `seconds`; for the four ZeeQi models, the client converts the same CLI value to the upstream-compatible `duration` field. Offer optional aspect ratio and audio generation only when relevant and only preserve an explicitly chosen audio preference.
 

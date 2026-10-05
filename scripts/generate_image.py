@@ -10,6 +10,7 @@ import datetime as dt
 import json
 import os
 import secrets
+import stat
 import sys
 import tempfile
 import time
@@ -391,13 +392,27 @@ def local_config_path() -> Path:
 def write_local_api_key(config_path: Path, api_key: str) -> None:
     if not api_key:
         raise SkillError("API key cannot be empty")
+    config: dict[str, Any] = {}
+    try:
+        file_info = config_path.lstat()
+        if not stat.S_ISREG(file_info.st_mode):
+            raise SkillError("local API key config must be a regular file")
+        existing = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        existing = {}
+    except (OSError, json.JSONDecodeError) as error:
+        raise SkillError(f"local API key config is invalid ({error})") from error
+    if not isinstance(existing, dict):
+        raise SkillError("local API key config must be a JSON object")
+    config.update(existing)
+    config["api_key"] = api_key
     config_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(config_path.parent, 0o700)
     temporary_path = config_path.with_name(f".{config_path.name}.{os.getpid()}.tmp")
     try:
         descriptor = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as config_file:
-            json.dump({"api_key": api_key}, config_file)
+            json.dump(config, config_file)
             config_file.write("\n")
         os.replace(temporary_path, config_path)
         os.chmod(config_path, 0o600)
@@ -436,10 +451,25 @@ def configure_api_key(config_path: Path, api_key: str, emit_reminder: bool = Tru
 
 def remove_local_api_key(config_path: Path) -> None:
     try:
-        config_path.unlink()
+        file_info = config_path.lstat()
+        if not stat.S_ISREG(file_info.st_mode):
+            raise SkillError("local API key config must be a regular file")
+        config = json.loads(config_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         print(f"No local API key was stored at {config_path}")
         return
+    except (OSError, json.JSONDecodeError) as error:
+        raise SkillError(f"local API key config is invalid ({error})") from error
+    if not isinstance(config, dict):
+        raise SkillError("local API key config must be a JSON object")
+    if "api_key" not in config:
+        print(f"No local API key was stored at {config_path}")
+        return
+    config.pop("api_key", None)
+    if config:
+        write_private_json(config_path, config)
+    else:
+        config_path.unlink(missing_ok=True)
     print(f"Removed local API key from {config_path}")
 
 

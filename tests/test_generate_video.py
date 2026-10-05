@@ -12,12 +12,13 @@ from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "generate_video.py"
 sys.path.insert(0, str(ROOT / "scripts"))
+import generate_image as image_skill
 import generate_video as video
 
 
@@ -112,7 +113,12 @@ class GenerateVideoTest(unittest.TestCase):
         MockVideoAPI.content_status = 200
         MockVideoAPI.task_status = "completed"
 
-    def run_skill(self, *args: str, with_key: bool = True, config_path: Path | None = None):
+    def run_skill(
+        self,
+        *args: str,
+        with_key: bool = True,
+        config_path: Path | None = None,
+    ):
         environment = os.environ.copy()
         environment["CODER_API_BASE_URL"] = f"http://127.0.0.1:{self.server.server_port}/v1"
         environment["CODER_API_CONFIG_PATH"] = str(config_path or ROOT / "tests" / "missing-credentials.json")
@@ -145,7 +151,7 @@ class GenerateVideoTest(unittest.TestCase):
         self.assertEqual(json.loads(catalog.stdout)["models"]["seedance-2.0-fast"], ["480p", "720p"])
         self.assertEqual(json.loads(catalog.stdout)["models"]["seedance-2.0-mini"], ["480p", "720p"])
         self.assertEqual(json.loads(catalog.stdout)["models"]["seedance-2.5"], ["480p", "720p", "1080p"])
-        self.assertEqual(json.loads(catalog.stdout)["model_profiles"]["seedance-2.5"]["image_input"], "public_url")
+        self.assertEqual(json.loads(catalog.stdout)["model_profiles"]["seedance-2.5"]["image_input"], "local_or_public_url_via_coder_api_image_library")
         begun = self.run_skill("--begin", "--prompt", "light in a bottle")
         state = json.loads(begun.stdout)
         self.assertEqual(state["status"], "model_selection")
@@ -195,12 +201,116 @@ class GenerateVideoTest(unittest.TestCase):
             image.write_bytes(PNG_BYTES)
             begun = self.run_skill("--begin", "--prompt", "animate this", "--image", str(image))
             state_path = json.loads(begun.stdout)["state"]
-            rejected = self.run_skill(
+            configured = self.run_skill(
                 "--select-configuration", "--state", state_path, "--model", "seedance-2.5",
                 "--seconds", "5", "--resolution", "720p",
             )
+            self.assertEqual(configured.returncode, 0, configured.stderr)
+            rejected = self.run_skill("--submit", "--state", state_path)
             self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("requires --image-url", rejected.stderr)
+            self.assertIn("New API key", rejected.stderr)
+            self.assertFalse(MockVideoAPI.submitted)
+            video.remove_state(Path(state_path))
+
+    def test_local_image_upload_uses_private_new_api_key_and_fixed_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "input.png"
+            image.write_bytes(PNG_BYTES)
+            config_path = Path(directory) / "credentials.json"
+            config_path.write_text(json.dumps({"api_key": "coder-api-key"}), encoding="utf-8")
+            video.save_image_upload_key(config_path, "sk-new-api-image-key")
+            self.assertEqual(json.loads(config_path.read_text(encoding="utf-8"))["api_key"], "coder-api-key")
+            self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
+            self.assertEqual(video.read_image_upload_key(config_path), "sk-new-api-image-key")
+            image_skill.configure_api_key(config_path, "updated-coder-key", emit_reminder=False)
+            self.assertEqual(json.loads(config_path.read_text(encoding="utf-8"))[video.IMAGE_UPLOAD_KEY_FIELD], "sk-new-api-image-key")
+            video.remove_image_upload_key(config_path)
+            self.assertEqual(json.loads(config_path.read_text(encoding="utf-8")), {"api_key": "updated-coder-key"})
+            video.save_image_upload_key(config_path, "sk-new-api-image-key")
+
+            media_id = "m_0" + "1" * 25
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = json.dumps({
+                "success": True,
+                "data": {"url": f"https://coderapi.vip/image-upload/{media_id}"},
+                "meta": {},
+            }).encode()
+            opener = Mock()
+            opener.open.return_value = response
+            with patch.dict(os.environ, {"CODER_API_CONFIG_PATH": str(config_path)}), \
+                 patch.object(video.urllib.request, "build_opener", return_value=opener):
+                uploaded_url = video.upload_reference_image(image, timeout=30)
+
+            request = opener.open.call_args.args[0]
+            self.assertEqual(request.full_url, video.IMAGE_UPLOAD_ENDPOINT)
+            self.assertEqual(request.get_header("Authorization"), "Bearer sk-new-api-image-key")
+            self.assertEqual(uploaded_url, f"https://coderapi.vip/image-upload/{media_id}")
+            self.assertNotIn(b"sk-new-api-image-key", request.data)
+            self.assertIn(b'name="file"; filename="reference.png"', request.data)
+
+    def test_local_image_upload_rejects_foreign_or_malformed_public_urls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "input.png"
+            image.write_bytes(PNG_BYTES)
+            config_path = Path(directory) / "credentials.json"
+            video.save_image_upload_key(config_path, "sk-new-api-image-key")
+            for url in (
+                "https://images.example/reference.png",
+                "http://coderapi.vip/image-upload/m_" + "1" * 26,
+                "https://coderapi.vip/image-upload/m_" + "8" + "1" * 25,
+                "https://coderapi.vip/image-upload/m_" + "1" * 26 + "?download=1",
+            ):
+                response = MagicMock()
+                response.__enter__.return_value = response
+                response.read.return_value = json.dumps({"data": {"url": url}}).encode()
+                opener = Mock()
+                opener.open.return_value = response
+                with self.subTest(url=url), \
+                     patch.dict(os.environ, {"CODER_API_CONFIG_PATH": str(config_path)}), \
+                     patch.object(video.urllib.request, "build_opener", return_value=opener):
+                    with self.assertRaises(video.SkillError):
+                        video.upload_reference_image(image, timeout=30)
+
+    def test_failed_local_upload_never_submits_video_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "input.png"
+            image.write_bytes(PNG_BYTES)
+            state_path = self.ready(model="seedance-2.5", image=str(image))
+            state = video.read_state(Path(state_path))
+            with patch.object(video, "upload_reference_image", side_effect=video.SkillError("upload rejected")), \
+                 patch.object(video, "http_json") as submit_request, \
+                 patch.object(video, "api_base_url", return_value="https://api.example/v1"), \
+                 patch.object(video, "read_api_key", return_value="coder-api-key"):
+                with self.assertRaisesRegex(video.SkillError, "upload rejected"):
+                    video.submit(Path(state_path), state, timeout=30)
+            submit_request.assert_not_called()
+            video.remove_state(Path(state_path))
+
+    def test_local_image_upload_url_is_only_sent_as_zee_qi_input_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "input.png"
+            image.write_bytes(PNG_BYTES)
+            state_path = self.ready(model="seedance-2.5", image=str(image))
+            state = video.read_state(Path(state_path))
+            media_id = "m_0" + "1" * 25
+            uploaded_url = f"https://coderapi.vip/image-upload/{media_id}"
+            with patch.object(video, "upload_reference_image", return_value=uploaded_url) as upload, \
+                 patch.object(video, "http_json", return_value={"id": "video-task-1", "status": "queued"}) as submit_request, \
+                 patch.object(video, "api_base_url", return_value="https://api.example/v1"), \
+                 patch.object(video, "read_api_key", return_value="coder-api-key"):
+                result = video.submit(Path(state_path), state, timeout=30)
+            upload.assert_called_once_with(image, 30)
+            submitted_url, submitted_key, _, body, content_type = submit_request.call_args.args
+            self.assertEqual(submitted_url, "https://api.example/v1/videos")
+            self.assertEqual(submitted_key, "coder-api-key")
+            self.assertEqual(content_type, "application/json")
+            payload = json.loads(body)
+            self.assertEqual(payload["input_reference"], uploaded_url)
+            self.assertNotIn("image", payload)
+            self.assertNotIn("image_path", payload)
+            self.assertEqual(result["task_id"], "video-task-1")
+            self.assertEqual(state["uploaded_image_url"], uploaded_url)
             video.remove_state(Path(state_path))
 
     def test_public_image_url_is_validated_before_workflow_creation(self) -> None:
