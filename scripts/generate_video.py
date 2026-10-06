@@ -267,6 +267,7 @@ def upload_reference_image(image_path: Path, timeout: int) -> str:
     body, content_type = upload_multipart_payload(image_path, "file")
     headers = {
         "Accept": "application/json, text/plain",
+        "User-Agent": "CoderAPIImageSkill/1.0",
         "Content-Type": content_type,
         "Content-Length": str(len(body)),
         "Authorization": f"Bearer {api_key}",

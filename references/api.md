@@ -58,6 +58,8 @@ The four supported ZeeQi models are `seedance-2.0`, `seedance-2.0-fast`, `seedan
 
 When the user supplies a local `--image`, configure their own New API key with `python3 scripts/generate_video.py --save-image-upload-key`. This prompts without echo and stores the key as `new_api_image_upload_key` in `~/.config/coder-api-image/credentials.json`, preserving the separate Coder API key. The skill uploads the validated PNG/JPEG/WebP to the fixed `https://coderapi.vip/image-upload/upload` endpoint, using the `file` multipart field and `Authorization: Bearer <New API key>`. Redirects are disabled, and the response URL is accepted only when it has the exact `https://coderapi.vip/image-upload/` origin/path and a valid media ULID. The New API key is never sent to Coder API or ZeeQi. Missing credentials, upload errors, or a non-canonical URL stop before the billable video request. Public `--image-url` inputs bypass the upload step and continue to be validated as public HTTP(S) URLs.
 
+The upload request identifies the client with `User-Agent: CoderAPIImageSkill/1.0`; the default `Python-urllib` agent can be rejected by the public image host before New API authentication. A public 403 with a non-JSON response is not proof that the key is invalid.
+
 Use `python3 scripts/generate_video.py --remove-image-upload-key` to remove only the New API image-upload key; the existing Coder API key remains configured.
 
 The ZeeQi plugin may accept additional provider fields internally, but this skill deliberately sends only the stable standard fields above. Do not add a model or parameter until its plugin contract, model-specific limits, billing facts, and mock tests are updated together.

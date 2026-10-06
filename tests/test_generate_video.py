@@ -245,6 +245,7 @@ class GenerateVideoTest(unittest.TestCase):
             request = opener.open.call_args.args[0]
             self.assertEqual(request.full_url, video.IMAGE_UPLOAD_ENDPOINT)
             self.assertEqual(request.get_header("Authorization"), "Bearer sk-new-api-image-key")
+            self.assertEqual(request.get_header("User-agent"), "CoderAPIImageSkill/1.0")
             self.assertEqual(uploaded_url, f"https://coderapi.vip/image-upload/{media_id}")
             self.assertNotIn(b"sk-new-api-image-key", request.data)
             self.assertIn(b'name="file"; filename="reference.png"', request.data)
