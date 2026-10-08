@@ -1,6 +1,6 @@
 ---
 name: coder-api-image
-description: Generate or edit images and generate text-to-video or image-to-video through Coder API at api.qlhazycoder.tech. Use when a user requests image or video generation with Coder API, a Coder API key, a saved Coder key, or this API endpoint, including Grok and the four ZeeQi Seedance models. Save a supplied key privately, require explicit model selection, and require a public image URL for ZeeQi image-to-video.
+description: Generate or edit images and generate text-to-video or image-to-video through Coder API at api.qlhazycoder.tech. Use when a user requests image or video generation with Coder API, a Coder API key, a saved Coder key, or this API endpoint, including Grok and the five ZeeQi Seedance models. Save a supplied key privately, require explicit model selection, and require a public image URL for ZeeQi image-to-video.
 ---
 
 # Coder API Image and Video
@@ -122,11 +122,12 @@ The current explicit video catalog is:
 | `grok-imagine-video` | `480p`, `720p` | 1–15 seconds | local PNG/JPEG/WebP or public URL |
 | `grok-imagine-video-1.5` | `480p`, `720p`, `1080p` | 1–15 seconds | local PNG/JPEG/WebP or public URL |
 | `seedance-2.0` | `480p`, `720p` | 1–3600 seconds | public URL or local image uploaded to the Coder API image library |
-| `seedance-2.0-fast` | `480p`, `720p` | 1–3600 seconds | public URL or local image uploaded to the Coder API image library |
-| `seedance-2.0-mini` | `480p`, `720p` | 1–3600 seconds | public URL or local image uploaded to the Coder API image library |
 | `seedance-2.5` | `480p`, `720p`, `1080p` | 1–3600 seconds | public URL or local image uploaded to the Coder API image library |
+| `seedance-2.0-fast-offical` | `480p`, `720p` | 1–3600 seconds | public URL or local image uploaded to the Coder API image library |
+| `seedance-2.0-mini-offical` | `480p`, `720p` | 1–3600 seconds | public URL or local image uploaded to the Coder API image library |
+| `seedance-2.0-offical` | `480p`, `720p`, `1080p` | 1–3600 seconds | public URL or local image uploaded to the Coder API image library |
 
-The four `seedance` names above are the only ZeeQi models implemented in this skill. Do not invent aliases or add removed models such as `H3`, `wan3.0-video`, or `seedance-2.5-once`.
+The five `seedance` names above are the only ZeeQi models implemented in this skill. Preserve the provider's exact `offical` spelling; do not rewrite it to `official`, invent aliases, or add removed models such as `H3`, `wan3.0-video`, or `seedance-2.5-once`.
 
 1. Start a video state with a prompt, a local reference image, or a public reference image URL:
 
@@ -138,7 +139,7 @@ The four `seedance` names above are the only ZeeQi models implemented in this sk
 
 `--image` is sent directly as multipart for Grok. For ZeeQi, a local `--image` is uploaded to the fixed image host first; the returned public URL is then sent as JSON `input_reference`. Alternatively, `--image-url` skips that upload and is sent directly; the two CLI options are mutually exclusive. Do not copy a local reference image to project storage or pretend a local filesystem path is a public URL. The installed ZeeQi protocol also requires a non-empty prompt even when a reference URL is supplied. If the New API image-upload key is not configured, submission stops before the billable video request.
 
-2. If the JSON status is `key_storage_decision`, save the key supplied in chat with the video `--save-local-key` command above. If no key was supplied, ask for one. For `model_selection`, ask a single question for all missing settings: exact model, seconds, and resolution. Use the selected model's duration range and resolution list from the catalog; never assume a model or silently downgrade a resolution. For the two Grok models, the request field is `seconds`; for the four ZeeQi models, the client converts the same CLI value to the upstream-compatible `duration` field. Offer optional aspect ratio and audio generation only when relevant and only preserve an explicitly chosen audio preference.
+2. If the JSON status is `key_storage_decision`, save the key supplied in chat with the video `--save-local-key` command above. If no key was supplied, ask for one. For `model_selection`, ask a single question for all missing settings: exact model, seconds, and resolution. Use the selected model's duration range and resolution list from the catalog; never assume a model or silently downgrade a resolution. For the two Grok models, the request field is `seconds`; for the five ZeeQi models, the client converts the same CLI value to the upstream-compatible `duration` field. Offer optional aspect ratio and audio generation only when relevant and only preserve an explicitly chosen audio preference.
 
    ```bash
    python3 scripts/generate_video.py --list-models

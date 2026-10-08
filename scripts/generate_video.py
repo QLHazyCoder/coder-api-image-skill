@@ -40,9 +40,10 @@ VIDEO_MODELS = {
     "grok-imagine-video": ["480p", "720p"],
     "grok-imagine-video-1.5": ["480p", "720p", "1080p"],
     "seedance-2.0": ["480p", "720p"],
-    "seedance-2.0-fast": ["480p", "720p"],
-    "seedance-2.0-mini": ["480p", "720p"],
     "seedance-2.5": ["480p", "720p", "1080p"],
+    "seedance-2.0-fast-offical": ["480p", "720p"],
+    "seedance-2.0-mini-offical": ["480p", "720p"],
+    "seedance-2.0-offical": ["480p", "720p", "1080p"],
 }
 VIDEO_MODEL_CONFIG = {
     "grok-imagine-video": {
@@ -63,19 +64,25 @@ VIDEO_MODEL_CONFIG = {
         "image_input": "local_or_public_url_via_coder_api_image_library",
         "aspect_ratios": None,
     },
-    "seedance-2.0-fast": {
+    "seedance-2.0-fast-offical": {
         "adapter": "zhiqi",
         "duration": {"min": 1, "max": 3600},
         "image_input": "local_or_public_url_via_coder_api_image_library",
         "aspect_ratios": None,
     },
-    "seedance-2.0-mini": {
+    "seedance-2.0-mini-offical": {
         "adapter": "zhiqi",
         "duration": {"min": 1, "max": 3600},
         "image_input": "local_or_public_url_via_coder_api_image_library",
         "aspect_ratios": None,
     },
     "seedance-2.5": {
+        "adapter": "zhiqi",
+        "duration": {"min": 1, "max": 3600},
+        "image_input": "local_or_public_url_via_coder_api_image_library",
+        "aspect_ratios": None,
+    },
+    "seedance-2.0-offical": {
         "adapter": "zhiqi",
         "duration": {"min": 1, "max": 3600},
         "image_input": "local_or_public_url_via_coder_api_image_library",
