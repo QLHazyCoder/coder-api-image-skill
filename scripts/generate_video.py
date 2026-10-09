@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create and retrieve one Grok video through Coder API's standard video endpoint."""
+"""Create and retrieve one Grok, Seedance, or H3 video through Coder API."""
 
 from __future__ import annotations
 
@@ -44,8 +44,17 @@ VIDEO_MODELS = {
     "seedance-2.0-fast-offical": ["480p", "720p"],
     "seedance-2.0-mini-offical": ["480p", "720p"],
     "seedance-2.0-offical": ["480p", "720p", "1080p"],
+    "H3": ["720p"],
 }
 VIDEO_MODEL_CONFIG = {
+    "H3": {
+        "adapter": "zhiqi",
+        "duration": {"min": 4, "max": 15},
+        "image_input": "local_or_public_url_via_coder_api_image_library",
+        "aspect_ratios": ["9:16", "16:9", "4:3", "3:4", "1:1"],
+        "max_images": 9,
+        "max_audios": 3,
+    },
     "grok-imagine-video": {
         "adapter": "grok",
         "duration": {"min": 1, "max": 15},
@@ -122,8 +131,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state", help="video workflow file returned by --begin")
     parser.add_argument("--prompt", help="video prompt (optional when an image is provided)")
     references = parser.add_mutually_exclusive_group()
-    references.add_argument("--image", help="local PNG, JPEG, or WebP reference image, at most 20 MiB")
-    references.add_argument("--image-url", help="public HTTP(S) reference image URL for ZeeQi video models")
+    references.add_argument("--image", action="append", help="local PNG/JPEG/WebP, at most 20 MiB; repeat for H3 (max 9)")
+    references.add_argument("--image-url", action="append", help="public HTTP(S) reference image URL; repeat for H3 (max 9)")
+    parser.add_argument("--audio-url", action="append", help="public HTTP(S) reference audio URL; H3 only (max 3)")
     parser.add_argument("--model", choices=sorted(VIDEO_MODELS))
     parser.add_argument("--seconds", type=int, help="video duration in seconds; range depends on the selected model")
     parser.add_argument("--resolution", help="480p, 720p, or 1080p where supported")
@@ -149,7 +159,9 @@ def validate_reference(path: str) -> Path:
     return image
 
 
-def validate_public_image_url(value: str) -> str:
+def validate_public_image_url(value: str, field: str = "--image-url") -> str:
+    if not isinstance(value, str):
+        raise SkillError(f"{field} must be a public HTTP(S) URL")
     url = (value or "").strip()
     parsed = urllib.parse.urlparse(url)
     if (
@@ -159,7 +171,7 @@ def validate_public_image_url(value: str) -> str:
         or parsed.password is not None
         or any(char.isspace() for char in url)
     ):
-        raise SkillError("--image-url must be a public HTTP(S) URL")
+        raise SkillError(f"{field} must be a public HTTP(S) URL")
     return url
 
 
@@ -327,8 +339,11 @@ def read_state(path: Path) -> dict[str, Any]:
 def begin(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     if not (args.prompt or "").strip() and not args.image and not args.image_url:
         raise SkillError("--prompt, --image, or --image-url is required for a video")
-    image = validate_reference(args.image) if args.image else None
-    image_url = validate_public_image_url(args.image_url) if args.image_url else None
+    if len(args.image or args.image_url or []) > 9 or len(args.audio_url or []) > 3:
+        raise SkillError("video references are limited to 9 images and 3 audio URLs; model-specific limits apply")
+    images = [str(validate_reference(value)) for value in args.image or []]
+    image_urls = [validate_public_image_url(value) for value in args.image_url or []]
+    audio_urls = [validate_public_image_url(value, "--audio-url") for value in args.audio_url or []]
     key_available = bool(os.environ.get("CODER_API_KEY", "").strip() or read_local_api_key(local_config_path()))
     directory = Path(tempfile.mkdtemp(prefix="coder-api-video-"))
     os.chmod(directory, 0o700)
@@ -340,10 +355,16 @@ def begin(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         "status": "model_selection" if key_available else "key_storage_decision",
         "local_key_saved": False,
     }
-    if image:
-        state["image_path"] = str(image)
-    if image_url:
-        state["image_url"] = image_url
+    if len(images) == 1:
+        state["image_path"] = images[0]
+    elif images:
+        state["image_paths"] = images
+    if len(image_urls) == 1:
+        state["image_url"] = image_urls[0]
+    elif image_urls:
+        state["image_urls"] = image_urls
+    if audio_urls:
+        state["audio_urls"] = audio_urls
     write_private_json(path, state)
     return path, state
 
@@ -359,7 +380,7 @@ def state_result(path: Path, state: dict[str, Any]) -> dict[str, Any]:
             "models": VIDEO_MODELS,
             "model_profiles": VIDEO_MODEL_CONFIG,
             "duration_ranges": {model: profile["duration"] for model, profile in VIDEO_MODEL_CONFIG.items()},
-            "seconds": {"min": 1, "max": 15},
+            "seconds": {"by_model": {model: profile["duration"] for model, profile in VIDEO_MODEL_CONFIG.items()}},
             "aspect_ratios": ASPECT_RATIOS,
         })
     elif status == "ready":
@@ -379,6 +400,31 @@ def state_result(path: Path, state: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def reference_inputs(state: dict[str, Any], model: str) -> tuple[list[str], list[str], list[str]]:
+    def values(plural: str, singular: str | None = None) -> list[str]:
+        if singular and state.get(singular):
+            if state.get(plural):
+                raise SkillError("video workflow has conflicting reference inputs")
+            result = [state[singular]]
+        else:
+            result = state.get(plural, [])
+        if not isinstance(result, list) or any(not isinstance(value, str) or not value.strip() for value in result):
+            raise SkillError("video workflow reference inputs are invalid")
+        return result
+
+    paths = values("image_paths", "image_path")
+    urls = values("image_urls", "image_url")
+    audios = values("audio_urls")
+    if paths and urls:
+        raise SkillError("use local images or public image URLs, not both")
+    profile = VIDEO_MODEL_CONFIG[model]
+    if len(paths) + len(urls) > profile.get("max_images", 1):
+        raise SkillError(f"{model} accepts at most {profile.get('max_images', 1)} reference images")
+    if len(audios) > profile.get("max_audios", 0):
+        raise SkillError(f"{model} accepts at most {profile.get('max_audios', 0)} reference audio URLs")
+    return paths, [validate_public_image_url(url) for url in urls], [validate_public_image_url(url, "--audio-url") for url in audios]
+
+
 def select_configuration(state: dict[str, Any], args: argparse.Namespace) -> None:
     if state["status"] != "model_selection":
         raise SkillError("video model selection is not the next workflow step")
@@ -390,8 +436,10 @@ def select_configuration(state: dict[str, Any], args: argparse.Namespace) -> Non
         raise SkillError(f"--seconds must be an integer between {duration['min']} and {duration['max']} for {args.model}")
     if args.resolution not in VIDEO_MODELS[args.model]:
         raise SkillError(f"unsupported resolution for {args.model}; choose {', '.join(VIDEO_MODELS[args.model])}")
-    if profile["adapter"] == "grok" and args.aspect_ratio and args.aspect_ratio not in ASPECT_RATIOS:
-        raise SkillError(f"unsupported aspect ratio; choose {', '.join(ASPECT_RATIOS)}")
+    ratios = profile["aspect_ratios"]
+    if ratios and args.aspect_ratio and args.aspect_ratio not in ratios:
+        raise SkillError(f"unsupported aspect ratio; choose {', '.join(ratios)}")
+    reference_inputs(state, args.model)
     if profile["adapter"] == "zhiqi" and not state.get("prompt", "").strip():
         raise SkillError(f"{args.model} requires a non-empty --prompt, including image-to-video")
     settings: dict[str, Any] = {"seconds": args.seconds, "resolution": args.resolution}
@@ -402,7 +450,7 @@ def select_configuration(state: dict[str, Any], args: argparse.Namespace) -> Non
     state.update({"model": args.model, "settings": settings, "status": "ready"})
 
 
-def request_payload(state: dict[str, Any], resolved_image_url: str | None = None) -> dict[str, Any]:
+def request_payload(state: dict[str, Any], resolved_image_url: str | list[str] | None = None, *, require_uploaded: bool = True) -> dict[str, Any]:
     model, settings = state.get("model"), state.get("settings")
     if model not in VIDEO_MODELS or not isinstance(settings, dict) or model not in VIDEO_MODEL_CONFIG:
         raise SkillError("video workflow configuration is invalid")
@@ -411,28 +459,36 @@ def request_payload(state: dict[str, Any], resolved_image_url: str | None = None
     if not isinstance(seconds, int) or isinstance(seconds, bool) or not duration["min"] <= seconds <= duration["max"] or resolution not in VIDEO_MODELS[model]:
         raise SkillError("video workflow configuration is invalid")
     adapter = VIDEO_MODEL_CONFIG[model]["adapter"]
-    if adapter == "zhiqi" and state.get("image_path") and not state.get("image_url") and not resolved_image_url:
-        raise SkillError(f"{model} requires uploading the local reference image before submission")
+    image_paths, image_urls, audio_urls = reference_inputs(state, model)
+    uploaded_urls = [resolved_image_url] if isinstance(resolved_image_url, str) else resolved_image_url or []
+    if not isinstance(uploaded_urls, list) or len(uploaded_urls) > len(image_paths):
+        raise SkillError("uploaded image references do not match the workflow")
+    uploaded_urls = [validate_public_image_url(url) for url in uploaded_urls]
+    if adapter == "zhiqi" and require_uploaded and len(uploaded_urls) != len(image_paths):
+        raise SkillError(f"{model} requires uploading all local reference images before submission")
     payload = {"model": model, "resolution": resolution}
     if adapter == "grok":
         payload["seconds"] = seconds
-        if state.get("image_url"):
-            payload["image"] = validate_public_image_url(state["image_url"])
+        if image_urls:
+            payload["image"] = image_urls[0]
     else:
         payload["duration"] = seconds
         if not state.get("prompt", "").strip():
             raise SkillError(f"{model} requires a non-empty prompt")
-        if state.get("image_url"):
-            payload["input_reference"] = validate_public_image_url(state["image_url"])
-        elif resolved_image_url:
-            payload["input_reference"] = validate_public_image_url(resolved_image_url)
-        elif state.get("image_path"):
-            raise SkillError("local reference image must be uploaded before the ZeeQi request")
+        references = image_urls or uploaded_urls
+        if references:
+            if model == "H3":
+                payload["reference_image_urls"] = references
+            else:
+                payload["input_reference"] = references[0]
+        if audio_urls:
+            payload["reference_audio_urls"] = audio_urls
     if state["prompt"]:
         payload["prompt"] = state["prompt"]
     ratio = settings.get("aspect_ratio")
     if ratio:
-        if adapter == "grok" and ratio not in ASPECT_RATIOS:
+        ratios = VIDEO_MODEL_CONFIG[model]["aspect_ratios"]
+        if ratios and ratio not in ratios:
             raise SkillError("video workflow aspect ratio is invalid")
         payload["aspect_ratio"] = ratio
     if "generate_audio" in settings:
@@ -503,20 +559,26 @@ def state_url(state: dict[str, Any]) -> str:
 def submit(path: Path, state: dict[str, Any], timeout: int) -> dict[str, Any]:
     if state["status"] != "ready":
         raise SkillError(f"video workflow is not ready to submit; current status is {state['status']}")
-    profile = VIDEO_MODEL_CONFIG.get(state.get("model"))
+    # Validate the full configuration before uploading any image or sending a paid request.
+    request_payload(state, require_uploaded=False)
+    profile = VIDEO_MODEL_CONFIG[state["model"]]
+    image_paths, _, _ = reference_inputs(state, state["model"])
     base_url = api_base_url()
     api_key = read_api_key()
-    resolved_image_url = state.get("uploaded_image_url")
-    if profile and profile["adapter"] == "zhiqi" and state.get("image_path") and not state.get("image_url"):
-        if resolved_image_url:
-            resolved_image_url = validate_public_image_url(resolved_image_url)
-        else:
-            resolved_image_url = upload_reference_image(Path(state["image_path"]), timeout)
-            state["uploaded_image_url"] = resolved_image_url
+    uploaded_urls = state.get("uploaded_image_urls", [state["uploaded_image_url"]] if state.get("uploaded_image_url") else [])
+    request_payload(state, uploaded_urls, require_uploaded=False)
+    if profile["adapter"] == "zhiqi":
+        # Persist each upload so a later upload failure resumes without uploading prior images again.
+        for image_path in image_paths[len(uploaded_urls):]:
+            uploaded_urls.append(upload_reference_image(Path(image_path), timeout))
+            if len(image_paths) == 1:
+                state["uploaded_image_url"] = uploaded_urls[0]
+            else:
+                state["uploaded_image_urls"] = uploaded_urls
             write_private_json(path, state)
-    payload = request_payload(state, resolved_image_url)
-    if state.get("image_path") and profile and profile["adapter"] == "grok":
-        body, content_type = multipart_payload(payload, Path(state["image_path"]))
+    payload = request_payload(state, uploaded_urls)
+    if image_paths and profile["adapter"] == "grok":
+        body, content_type = multipart_payload(payload, Path(image_paths[0]))
     else:
         body, content_type = json.dumps(payload).encode("utf-8"), "application/json"
     state.update({"status": "submitting", "base_url": base_url})
@@ -645,8 +707,8 @@ def main() -> int:
     try:
         if not 1 <= args.timeout <= MAX_TIMEOUT or args.max_wait < 0 or args.poll_interval < 1:
             raise SkillError("--timeout must be 1-1000; --max-wait >= 0; --poll-interval >= 1")
-        if not args.begin and (args.prompt is not None or args.image is not None or args.image_url is not None):
-            raise SkillError("--prompt and --image are accepted only with --begin")
+        if not args.begin and any(value is not None for value in (args.prompt, args.image, args.image_url, args.audio_url)):
+            raise SkillError("--prompt, --image, --image-url, and --audio-url are accepted only with --begin")
         if not args.select_configuration and any(value is not None for value in (args.model, args.seconds, args.resolution, args.aspect_ratio, args.generate_audio)):
             raise SkillError("video model and settings are accepted only with --select-configuration")
         if not args.attach_task_id and args.task_id is not None:
@@ -666,7 +728,7 @@ def main() -> int:
                 "models": VIDEO_MODELS,
                 "model_profiles": VIDEO_MODEL_CONFIG,
                 "duration_ranges": {model: profile["duration"] for model, profile in VIDEO_MODEL_CONFIG.items()},
-                "seconds": {"min": 1, "max": 15},
+                "seconds": {"by_model": {model: profile["duration"] for model, profile in VIDEO_MODEL_CONFIG.items()}},
                 "aspect_ratios": ASPECT_RATIOS,
             }
         elif args.begin:

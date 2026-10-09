@@ -62,6 +62,16 @@ The upload request identifies the client with `User-Agent: CoderAPIImageSkill/1.
 
 Use `python3 scripts/generate_video.py --remove-image-upload-key` to remove only the New API image-upload key; the existing Coder API key remains configured.
 
+### MiniMax H3 adapter
+
+`H3` uses the ZeeQi JSON adapter with `duration` 4–15, `resolution` `720p`,
+and aspect ratios `9:16`, `16:9`, `4:3`, `3:4`, and `1:1`. It accepts at most
+9 public `reference_image_urls` and 3 public `reference_audio_urls`. Local
+images are uploaded one by one to the existing authenticated image host before
+the billable video request; local audio files are intentionally not accepted.
+The pricing fact is per second, so the New API expression is
+`tier("base", u("duration") * 0.008)`.
+
 The ZeeQi plugin may accept additional provider fields internally, but this skill deliberately sends only the stable standard fields above. Do not add a model or parameter until its plugin contract, model-specific limits, billing facts, and mock tests are updated together.
 
 Creation must return a public task `id`. The script persists a `submitting` state before sending the request and the public `id` immediately after receiving a valid response. A network timeout, `429`, `5xx`, redirect, invalid response, or interruption can mean the upstream accepted and billed the request; the state must **not** be resubmitted. `--attach-task-id` can bind a public ID recovered from gateway task history to an uncertain state. `GET` and content downloads can be resumed on the same task; no response URL is followed, and the Bearer token is sent only to the configured API host. Downloads are capped at 512 MiB, checked for an MP4 header, and never overwrite an existing file. Local download failures leave the task state intact for a later `--poll`.

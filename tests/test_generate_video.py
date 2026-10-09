@@ -152,6 +152,8 @@ class GenerateVideoTest(unittest.TestCase):
         self.assertEqual(json.loads(catalog.stdout)["models"]["seedance-2.0-fast-offical"], ["480p", "720p"])
         self.assertEqual(json.loads(catalog.stdout)["models"]["seedance-2.0-mini-offical"], ["480p", "720p"])
         self.assertEqual(json.loads(catalog.stdout)["models"]["seedance-2.0-offical"], ["480p", "720p", "1080p"])
+        self.assertEqual(json.loads(catalog.stdout)["models"]["H3"], ["720p"])
+        self.assertEqual(json.loads(catalog.stdout)["model_profiles"]["H3"]["duration"], {"min": 4, "max": 15})
         self.assertEqual(json.loads(catalog.stdout)["model_profiles"]["seedance-2.5"]["image_input"], "local_or_public_url_via_coder_api_image_library")
         begun = self.run_skill("--begin", "--prompt", "light in a bottle")
         state = json.loads(begun.stdout)
@@ -185,6 +187,97 @@ class GenerateVideoTest(unittest.TestCase):
             "generate_audio": True,
         })
         video.remove_state(Path(state_path))
+
+    def test_h3_supports_nine_images_and_three_audio_urls(self) -> None:
+        images = [f"https://media.example/{index}.png" for index in range(9)]
+        audios = [f"https://media.example/{index}.mp3" for index in range(3)]
+        args = ["--begin", "--prompt", "Animate the references"]
+        for url in images:
+            args += ["--image-url", url]
+        for url in audios:
+            args += ["--audio-url", url]
+        begun = self.run_skill(*args)
+        self.assertEqual(begun.returncode, 0, begun.stderr)
+        path = json.loads(begun.stdout)["state"]
+        configured = self.run_skill("--select-configuration", "--state", path, "--model", "H3", "--seconds", "15", "--resolution", "720p", "--aspect-ratio", "3:4")
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+        submitted = self.run_skill("--submit", "--state", path)
+        self.assertEqual(submitted.returncode, 0, submitted.stderr)
+        self.assertEqual(MockVideoAPI.submitted, [{
+            "model": "H3", "prompt": "Animate the references", "duration": 15, "resolution": "720p",
+            "aspect_ratio": "3:4", "reference_image_urls": images, "reference_audio_urls": audios,
+        }])
+        video.remove_state(Path(path))
+
+    def test_h3_bounds_are_checked_before_upload_or_submission(self) -> None:
+        begun = self.run_skill("--begin", "--prompt", "Sunrise")
+        path = json.loads(begun.stdout)["state"]
+        for seconds, resolution, ratio in [("3", "720p", "16:9"), ("16", "720p", "16:9"), ("4", "480p", "16:9"), ("4", "1080p", "16:9"), ("4", "720p", "3:2")]:
+            with self.subTest(seconds=seconds, resolution=resolution, ratio=ratio):
+                result = self.run_skill("--select-configuration", "--state", path, "--model", "H3", "--seconds", seconds, "--resolution", resolution, "--aspect-ratio", ratio)
+                self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(MockVideoAPI.submitted)
+        video.remove_state(Path(path))
+        for option, count, url in [("--image-url", 10, "https://media.example/ref.png"), ("--audio-url", 4, "https://media.example/ref.mp3")]:
+            result = self.run_skill("--begin", "--prompt", "Sunrise", *([option, url] * count))
+            self.assertNotEqual(result.returncode, 0)
+        result = self.run_skill("--begin", "--prompt", "Sunrise", "--audio-url", "file:///tmp/audio.mp3")
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_h3_reference_options_do_not_expand_other_models(self) -> None:
+        for references in [
+            ["--image-url", "https://media.example/a.png", "--image-url", "https://media.example/b.png"],
+            ["--audio-url", "https://media.example/a.mp3"],
+        ]:
+            begun = self.run_skill("--begin", "--prompt", "Sunrise", *references)
+            path = json.loads(begun.stdout)["state"]
+            for model in ("grok-imagine-video", "seedance-2.0"):
+                result = self.run_skill("--select-configuration", "--state", path, "--model", model, "--seconds", "4", "--resolution", "720p")
+                self.assertNotEqual(result.returncode, 0)
+            video.remove_state(Path(path))
+
+    def test_h3_resumes_partial_image_upload_without_paid_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            first, second = Path(directory) / "first.png", Path(directory) / "second.png"
+            first.write_bytes(PNG_BYTES)
+            second.write_bytes(PNG_BYTES)
+            begun = self.run_skill("--begin", "--prompt", "Animate both", "--image", str(first), "--image", str(second))
+            path = Path(json.loads(begun.stdout)["state"])
+            configured = self.run_skill("--select-configuration", "--state", str(path), "--model", "H3", "--seconds", "4", "--resolution", "720p")
+            self.assertEqual(configured.returncode, 0, configured.stderr)
+            state = video.read_state(path)
+            urls = ["https://coderapi.vip/image-upload/m_0" + digit * 25 for digit in ("1", "2")]
+            with patch.object(video, "upload_reference_image", side_effect=[urls[0], video.SkillError("upload failed")]) as upload, \
+                 patch.object(video, "http_json") as submit_request, \
+                 patch.object(video, "read_api_key", return_value="test-video-key"):
+                with self.assertRaisesRegex(video.SkillError, "upload failed"):
+                    video.submit(path, state, 30)
+                submit_request.assert_not_called()
+                self.assertEqual(upload.call_count, 2)
+            resumed = video.read_state(path)
+            self.assertEqual(resumed["status"], "ready")
+            self.assertEqual(resumed["uploaded_image_urls"], urls[:1])
+            with patch.object(video, "upload_reference_image", return_value=urls[1]) as upload, \
+                 patch.object(video, "http_json", return_value={"id": "video-task-1"}) as submit_request, \
+                 patch.object(video, "read_api_key", return_value="test-video-key"):
+                video.submit(path, resumed, 30)
+                upload.assert_called_once_with(second, 30)
+                self.assertEqual(json.loads(submit_request.call_args.args[3])["reference_image_urls"], urls)
+                with self.assertRaises(video.SkillError):
+                    video.submit(path, resumed, 30)
+                submit_request.assert_called_once()
+            video.remove_state(path)
+
+    def test_h3_tampered_configuration_is_rejected_before_upload(self) -> None:
+        path = Path(self.ready(model="H3", resolution="720p"))
+        state = video.read_state(path)
+        state["image_paths"] = ["/does/not/exist.png"] * 10
+        with patch.object(video, "upload_reference_image") as upload, patch.object(video, "http_json") as request:
+            with self.assertRaisesRegex(video.SkillError, "at most 9"):
+                video.submit(path, state, 30)
+            upload.assert_not_called()
+            request.assert_not_called()
+        video.remove_state(path)
 
     def test_zhiqi_resolution_and_local_image_rules_are_model_specific(self) -> None:
         begun = self.run_skill("--begin", "--prompt", "sunrise")
